@@ -289,8 +289,15 @@
     }
     function filterDiff(raw, q) {
       if (!q) return raw;
-      const blocks = raw.split(/(?=^diff --git )/m); const ql = q.toLowerCase();
-      return blocks.filter(b => b.toLowerCase().includes(ql)).join('');
+      const blocks = raw.split(/(?=^diff --git )/m);
+      const ql = q.toLowerCase();
+      // Match the file PATH only, not the diff body — otherwise a query like
+      // "grid." would match every file whose diffed code mentions "grid.".
+      return blocks.filter(b => {
+        const head = b.match(/^diff --git a\/\S+ b\/(.+)$/m);
+        const path = head ? head[1] : '';
+        return path.toLowerCase().includes(ql);
+      }).join('');
     }
     function updateStats(sf, uf) {
       let a = 0, d = 0; for (const f of sf) { a += f.add; d += f.del; } for (const f of uf) { a += f.add; d += f.del; }
