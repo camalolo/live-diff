@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en" style="color-scheme: dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>live-diff</title>
+  <style>
+    :root {
+      --bg: #0d1117; --bg-soft: #161b22; --bg-soft2: #1c232c;
+      --border: #30363d; --text: #c9d1d9; --text-dim: #8b949e;
+      --green: #3fb950; --red: #f85149; --accent: #58a6ff;
+      --staged: #d29922;
+      --filter-h: 47px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Noto Sans, Helvetica, Arial, sans-serif;
+      font-size: 13px; line-height: 1.45;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    header {
+      flex: 0 0 auto; height: 50px; display: flex; align-items: center; gap: 14px; padding: 0 14px;
+      background: rgba(13,17,23,.9); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    }
+    .title { font-weight: 600; font-size: 14px; white-space: nowrap; }
+    .title small { color: var(--text-dim); font-weight: 400; margin-left: 6px; }
+    .live { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+    .live.on .dot { background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(63,185,80,.55)} 70%{box-shadow:0 0 0 7px rgba(63,185,80,0)} 100%{box-shadow:0 0 0 0 rgba(63,185,80,0)} }
+    .stats { display: inline-flex; gap: 12px; font-variant-numeric: tabular-nums; }
+    .stats .add { color: var(--green); } .stats .del { color: var(--red); } .stats .files { color: var(--text-dim); }
+    .spacer { flex: 1; }
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+    .seg button { background: var(--bg-soft); color: var(--text-dim); border: 0; padding: 5px 10px; cursor: pointer; font-size: 12px; border-right: 1px solid var(--border); }
+    .seg button:last-child { border-right: 0; }
+    .seg button.active { background: var(--bg-soft2); color: var(--accent); }
+    .stamp { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+    .app { flex: 1; display: flex; min-height: 0; }
+    .sidebar { width: 350px; flex: 0 0 auto; overflow-y: auto; background: var(--bg); border-right: 1px solid var(--border); }
+    .filter-bar {
+      position: sticky; top: 0; z-index: 5; height: var(--filter-h);
+      display: flex; align-items: center; padding: 0 8px;
+      background: var(--bg); border-bottom: 1px solid var(--border);
+    }
+    .filter-bar input {
+      width: 100%; padding: 6px 10px; background: var(--bg-soft); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px; font-size: 12px; outline: none;
+    }
+    .filter-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,.25); }
+    .main { flex: 1; position: relative; min-width: 0; }
+    #diff { position: absolute; inset: 0; }
+    .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 14px; pointer-events: none; text-align: center; padding: 20px; }
+    .overlay .big { font-size: 40px; display: block; margin-bottom: 8px; opacity: .4; }
+
+    .section { border-bottom: 1px solid var(--border); }
+    .section-head {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none;
+      position: sticky; top: var(--filter-h); background: var(--bg); z-index: 2;
+    }
+    .section-head:hover { background: var(--bg-soft); }
+    .section-head .label { font-size: 12px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+    .section.staged .label { color: var(--staged); }
+    .section.unstaged .label { color: var(--text-dim); }
+    .section-head .count { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .section-head .acts { margin-left: auto; display: flex; gap: 8px; font-size: 11px; }
+    .section-head .acts a { color: var(--text-dim); cursor: pointer; }
+    .section-head .acts a:hover { color: var(--accent); }
+    .section-head .caret { color: var(--text-dim); transition: transform .12s; width: 12px; }
+    .section.collapsed .section-tree { display: none; }
+    .section.collapsed .caret { transform: rotate(-90deg); }
+    .section-tree { padding: 2px 6px 12px; }
+
+    .empty-section { padding: 8px 12px 14px; color: var(--text-dim); font-size: 12px; font-style: italic; }
+
+    .tree { font-size: 12.5px; }
+    .folder > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 5px; white-space: nowrap; }
+    .folder > summary::-webkit-details-marker { display: none; }
+    .folder > summary:hover { background: var(--bg-soft); }
+    .caret { width: 12px; display: inline-block; color: var(--text-dim); transition: transform .12s; }
+    .folder[open] > summary .caret { transform: rotate(90deg); }
+    .fname { overflow: hidden; text-overflow: ellipsis; }
+    .folder .fname { color: var(--text-dim); font-weight: 500; }
+    .badge { margin-left: auto; padding-left: 8px; font-variant-numeric: tabular-nums; font-size: 11px; white-space: nowrap; }
+    .badge .add { color: var(--green); } .badge .del { color: var(--red); margin-left: 6px; }
+    .badge .muted { color: var(--text-dim); opacity: .5; }
+    .folder-children { padding-left: 14px; }
+    .file { cursor: pointer; display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 6px; border-radius: 5px; white-space: nowrap; }
+    .file:hover { background: var(--bg-soft); }
+    .file.active { background: rgba(88,166,255,.16); box-shadow: inset 2px 0 0 var(--accent); }
+    .file .fname.added { color: var(--green); }
+    .file .fname.deleted { color: var(--red); }
+    .cb { margin: 0; cursor: pointer; accent-color: var(--green); flex: 0 0 auto; }
+    .cb:disabled { cursor: progress; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="title"><span id="repo-name">…</span> <small>· live diff</small></span>
+    <span class="live" id="live"><span class="dot"></span><span id="livetxt">connecting…</span></span>
+    <span class="stats">
+      <span class="files" id="s-files">—</span>
+      <span class="add" id="s-add"></span>
+      <span class="del" id="s-del"></span>
+    </span>
+    <span class="spacer"></span>
+    <span class="seg">
+      <button id="btn-split" class="active">Split</button>
+      <button id="btn-unified">Unified</button>
+    </span>
+    <span class="stamp" id="stamp"></span>
+  </header>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="filter-bar">
+        <input id="filter" type="search" placeholder="Filter files…  (press /)">
+      </div>
+      <div class="section staged" id="sec-staged">
+        <div class="section-head">
+          <span class="caret">▾</span><span class="label">Staged</span><span class="count" id="cnt-staged"></span>
+          <span class="acts"><a class="fold-all">collapse</a></span>
+        </div>
+        <div class="section-tree"><div class="tree" id="tree-staged"></div></div>
+      </div>
+      <div class="section unstaged" id="sec-unstaged">
+        <div class="section-head">
+          <span class="caret">▾</span><span class="label">Unstaged</span><span class="count" id="cnt-unstaged"></span>
+          <span class="acts"><a class="fold-all">collapse</a></span>
+        </div>
+        <div class="section-tree"><div class="tree" id="tree-unstaged"></div></div>
+      </div>
+    </aside>
+    <main class="main">
+      <div id="diff"></div>
+      <div class="overlay" id="overlay"><span class="big">‹/›</span>Select a file to view its diff.</div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script>
+    const CDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/';
+    window.MonacoEnvironment = {
+      getWorkerUrl: () => `data:text/javascript;charset=utf-8,${encodeURIComponent(
+        `self.MonacoEnvironment={baseUrl:'${CDN}'};importScripts('${CDN}vs/base/worker/workerMain.js');`)}`,
+    };
+
+    const diffEl = document.getElementById('diff'), overlay = document.getElementById('overlay');
+    const treeStaged = document.getElementById('tree-staged'), treeUnstaged = document.getElementById('tree-unstaged');
+    const cntStaged = document.getElementById('cnt-staged'), cntUnstaged = document.getElementById('cnt-unstaged');
+    const liveEl = document.getElementById('live'), liveTxt = document.getElementById('livetxt');
+    const sFiles = document.getElementById('s-files'), sAdd = document.getElementById('s-add'), sDel = document.getElementById('s-del');
+    const stamp = document.getElementById('stamp'), filterInput = document.getElementById('filter');
+    const btnSplit = document.getElementById('btn-split'), btnUnified = document.getElementById('btn-unified');
+
+    let monacoReady = null, diffEditor = null, currentModels = null;
+    let currentPath = null, currentSide = null, currentSig = '';
+    let sideBySide = true;
+    let lastSig = null, lastData = null, currentFilter = '';
+
+    function loadMonaco() {
+      if (monacoReady) return monacoReady;
+      monacoReady = new Promise((resolve) => {
+        require.config({ paths: { vs: CDN + 'vs' } });
+        require(['vs/editor/editor.main'], () => { monaco.editor.setTheme('vs-dark'); resolve(window.monaco); });
+      });
+      return monacoReady;
+    }
+    function ensureEditor(mono) {
+      if (diffEditor) return diffEditor;
+      diffEditor = mono.editor.createDiffEditor(diffEl, {
+        readOnly: true, renderSideBySide: sideBySide, automaticLayout: true,
+        minimap: { enabled: true }, scrollBeyondLastLine: false, renderWhitespace: 'selection',
+      });
+      return diffEditor;
+    }
+    function showOverlay(msg) { overlay.innerHTML = `<span class="big">‹/›</span>${msg}`; overlay.style.display = 'flex'; }
+    function hideOverlay() { overlay.style.display = 'none'; }
+    function sig(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
+
+    async function loadFile(path, side, node) {
+      document.querySelectorAll('.file.active').forEach(n => n.classList.remove('active'));
+      if (node) node.classList.add('active');
+      showOverlay('Loading…');
+      try {
+        const r = await fetch('api/file?path=' + encodeURIComponent(path) + '&side=' + side);
+        if (!r.ok) throw new Error(r.status);
+        const data = await r.json();
+        if (data.binary) { showOverlay('Binary file — no textual diff'); return; }
+        const s = sig(data.before) + ':' + sig(data.after);
+        const mono = await loadMonaco(); hideOverlay(); ensureEditor(mono);
+        if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
+        currentModels = {
+          original: mono.editor.createModel(data.before || '', data.language),
+          modified: mono.editor.createModel(data.after || '', data.language),
+        };
+        diffEditor.setModel(currentModels);
+        currentPath = path; currentSide = side; currentSig = s;
+      } catch (e) { showOverlay('Failed to load: ' + path); }
+    }
+
+    async function toggleStage(path, side, cb) {
+      const endpoint = side === 'unstaged' ? 'api/stage' : 'api/unstage';
+      cb.disabled = true;
+      try { await fetch(endpoint + '?path=' + encodeURIComponent(path), { method: 'POST' }); }
+      catch (e) { cb.disabled = false; }
+      // server recomputes + notifies -> refresh() re-renders the trees.
+    }
+
+    /* ---------------- diff parsing + tree ---------------- */
+    function parseFiles(diff) {
+      if (!diff) return [];
+      const blocks = diff.split(/^diff --git /m); const out = [];
+      for (let bi = 1; bi < blocks.length; bi++) {
+        const block = blocks[bi];
+        const head = block.match(/^a\/\S+ b\/(.+)$/m);
+        let p = head ? head[1] : 'unknown';
+        const rt = block.match(/^rename to (.+)$/m); if (rt) p = rt[1];
+        let status = 'modified';
+        if (/^new file mode/.test(block)) status = 'added';
+        else if (/^deleted file mode/.test(block)) status = 'deleted';
+        else if (/^rename (from|to) /.test(block)) status = 'renamed';
+        const add = (block.match(/^\+[^+]/gm) || []).length;
+        const del = (block.match(/^-[^-]/gm) || []).length;
+        out.push({ path: p, add, del, status, idx: out.length });
+      }
+      return out;
+    }
+    function buildModel(files) {
+      const root = { dirs: {}, files: [] };
+      for (const f of files) {
+        const parts = f.path.split('/'); let node = root;
+        for (let i = 0; i < parts.length; i++) {
+          if (i === parts.length - 1) node.files.push(f);
+          else { const seg = parts[i]; if (!node.dirs[seg]) node.dirs[seg] = { name: seg, dirs: {}, files: [] }; node = node.dirs[seg]; }
+        }
+      }
+      return root;
+    }
+    function subtreeStats(dir) {
+      let add = 0, del = 0, count = 0;
+      for (const f of dir.files) { add += f.add; del += f.del; count++; }
+      for (const k of Object.keys(dir.dirs)) { const s = subtreeStats(dir.dirs[k]); add += s.add; del += s.del; count += s.count; }
+      return { add, del, count };
+    }
+    function esc(s) { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function badge(add, del) {
+      if (!add && !del) return '<span class="badge"><span class="muted">·</span></span>';
+      return `<span class="badge"><span class="add">+${add}</span><span class="del">−${del}</span></span>`;
+    }
+    function renderSection(side, files, container) {
+      container.innerHTML = '';
+      if (!files.length) { container.innerHTML = '<div class="empty-section">Nothing here.</div>'; return; }
+      renderDir(buildModel(files), container, side);
+      // re-apply active highlight if the open file is in this section
+      if (currentSide === side && currentPath) {
+        const n = container.querySelector(`.file[data-path="${cssEsc(currentPath)}"][data-side="${side}"]`);
+        if (n) n.classList.add('active');
+      }
+    }
+    function cssEsc(s) { return s.replace(/["\\]/g, '\\$&'); }
+    function renderDir(dir, container, side) {
+      for (const key of Object.keys(dir.dirs).sort()) {
+        let child = dir.dirs[key]; let name = child.name;
+        while (Object.keys(child.dirs).length === 1 && child.files.length === 0) {
+          const onlyKey = Object.keys(child.dirs)[0]; child = child.dirs[onlyKey]; name += '/' + child.name;
+        }
+        const det = document.createElement('details'); det.open = true; det.className = 'folder';
+        const s = subtreeStats(child);
+        det.innerHTML = `<summary><span class="caret">▸</span><span class="fname">${esc(name)}</span>${badge(s.add, s.del)}</summary>`;
+        const inner = document.createElement('div'); inner.className = 'folder-children';
+        renderDir(child, inner, side); det.appendChild(inner); container.appendChild(det);
+      }
+      for (const f of dir.files) {
+        const div = document.createElement('div'); div.className = 'file'; div.dataset.path = f.path; div.dataset.side = side;
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'cb';
+        cb.checked = side === 'staged'; cb.title = side === 'staged' ? 'Unstage' : 'Stage';
+        cb.addEventListener('click', (e) => e.stopPropagation());
+        cb.addEventListener('change', () => toggleStage(f.path, side, cb));
+        div.appendChild(cb);
+        const base = f.path.split('/').pop();
+        const cls = f.status === 'added' ? 'added' : f.status === 'deleted' ? 'deleted' : '';
+        div.insertAdjacentHTML('beforeend', `<span class="fname ${cls}" title="${esc(f.path)}">${esc(base)}</span>${badge(f.add, f.del)}`);
+        div.addEventListener('click', () => loadFile(f.path, side, div));
+        container.appendChild(div);
+      }
+    }
+    function filterDiff(raw, q) {
+      if (!q) return raw;
+      const blocks = raw.split(/(?=^diff --git )/m); const ql = q.toLowerCase();
+      return blocks.filter(b => b.toLowerCase().includes(ql)).join('');
+    }
+    function updateStats(sf, uf) {
+      let a = 0, d = 0; for (const f of sf) { a += f.add; d += f.del; } for (const f of uf) { a += f.add; d += f.del; }
+      const n = sf.length + uf.length;
+      sFiles.textContent = n + (n === 1 ? ' file' : ' files'); sAdd.textContent = '+' + a; sDel.textContent = '−' + d;
+      cntStaged.textContent = sf.length ? `${sf.length} · +${sf.reduce((x, f) => x + f.add, 0)} −${sf.reduce((x, f) => x + f.del, 0)}` : '';
+      cntUnstaged.textContent = uf.length ? `${uf.length} · +${uf.reduce((x, f) => x + f.add, 0)} −${uf.reduce((x, f) => x + f.del, 0)}` : '';
+    }
+
+    function rerender() {
+      if (!lastData) return;
+      const sf = parseFiles(filterDiff(lastData.staged, currentFilter));
+      const uf = parseFiles(filterDiff(lastData.unstaged, currentFilter));
+      document.getElementById('sec-staged').style.display = sf.length ? '' : 'none';
+      renderSection('staged', sf, treeStaged);
+      renderSection('unstaged', uf, treeUnstaged);
+      updateStats(sf, uf);
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch('api/diff', { cache: 'no-store' });
+        const data = await r.json();
+        const s = data.staged + '\x00' + data.unstaged;
+        if (s === lastSig) return;
+        lastSig = s; lastData = data;
+        const sbTop = document.getElementById('sidebar').scrollTop;
+        rerender();
+        document.getElementById('sidebar').scrollTop = sbTop;
+        stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
+        // live-refresh the open file if it still exists on its side
+        if (currentPath && currentSide) {
+          const list = parseFiles(data[currentSide]);
+          if (list.some(f => f.path === currentPath)) {
+            try {
+              const r2 = await fetch('api/file?path=' + encodeURIComponent(currentPath) + '&side=' + currentSide, { cache: 'no-store' });
+              const d2 = await r2.json();
+              if (!d2.binary) {
+                const ns = sig(d2.before) + ':' + sig(d2.after);
+                if (ns !== currentSig) {
+                  const mono = await loadMonaco(); ensureEditor(mono);
+                  if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
+                  currentModels = {
+                    original: mono.editor.createModel(d2.before || '', d2.language),
+                    modified: mono.editor.createModel(d2.after || '', d2.language),
+                  };
+                  diffEditor.setModel(currentModels); currentSig = ns;
+                }
+              }
+            } catch (e) {}
+          } else {
+            if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); currentModels = null; }
+            if (diffEditor) diffEditor.setModel({ original: null, modified: null });
+            currentPath = null; currentSide = null; currentSig = '';
+            showOverlay('File no longer changed.');
+          }
+        }
+      } catch (e) { liveTxt.textContent = 'error'; }
+    }
+
+    /* ---------------- events ---------------- */
+    let ft = null;
+    filterInput.addEventListener('input', () => {
+      currentFilter = filterInput.value.trim();
+      clearTimeout(ft); ft = setTimeout(rerender, 120);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement !== filterInput) { e.preventDefault(); filterInput.focus(); }
+      if (e.key === 'Escape' && document.activeElement === filterInput) { filterInput.value = ''; currentFilter = ''; rerender(); filterInput.blur(); }
+    });
+    function setLayout(sbs) { sideBySide = sbs; btnSplit.classList.toggle('active', sbs); btnUnified.classList.toggle('active', !sbs); if (diffEditor) diffEditor.updateOptions({ renderSideBySide: sbs }); }
+    btnSplit.addEventListener('click', () => setLayout(true));
+    btnUnified.addEventListener('click', () => setLayout(false));
+    // section collapse (head click) + collapse-folders (acts)
+    document.querySelectorAll('.section-head').forEach(h => h.addEventListener('click', (e) => {
+      if (e.target.closest('.acts')) return;
+      h.parentElement.classList.toggle('collapsed');
+    }));
+    document.querySelectorAll('.section .fold-all').forEach(a => a.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sec = a.closest('.section'); const folders = sec.querySelectorAll('.folder');
+      const anyOpen = [...folders].some(d => d.open);
+      folders.forEach(d => d.open = !anyOpen);
+      a.textContent = anyOpen ? 'expand' : 'collapse';
+    }));
+
+    const es = new EventSource('api/watch');
+    es.addEventListener('hello', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; refresh(); });
+    es.addEventListener('open', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; });
+    es.addEventListener('changed', refresh);
+    es.addEventListener('error', () => { liveEl.classList.remove('on'); liveTxt.textContent = 'reconnecting…'; });
+
+    // Dynamic title from the server (repo name).
+    fetch('api/config').then(r => r.json()).then(c => {
+      const n = c.name || 'live-diff';
+      document.getElementById('repo-name').textContent = n;
+      document.title = n + ' · live-diff';
+    }).catch(() => {});
+
+    loadMonaco();
+    refresh();
+  </script>
+</body>
+</html>

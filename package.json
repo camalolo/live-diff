@@ -1,0 +1,27 @@
+{
+  "name": "live-diff",
+  "version": "1.0.0",
+  "description": "Live working-tree diff viewer with per-file staging, for any git repository.",
+  "main": "server.js",
+  "bin": {
+    "live-diff": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "git", "diff", "monaco", "live", "staging", "viewer", "code-review"
+  ],
+  "author": "camalolo",
+  "license": "MIT",
+  "files": [
+    "server.js",
+    "public",
+    "deploy",
+    "README.md",
+    "LICENSE"
+  ]
+}

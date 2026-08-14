@@ -1,0 +1,17 @@
+# Per-instance config for live-diff@<name>.service
+# Copy to /etc/live-diff/<name>.conf and edit. Lines without `=` are ignored.
+
+# >>> EDIT: absolute path of the git repository to watch.
+LIVE_DIFF_REPO=/home/me/projects/my-repo
+
+# >>> EDIT: port to listen on. MUST be unique per instance.
+LIVE_DIFF_PORT=4966
+
+# Bind address. 127.0.0.1 = localhost only (recommended; expose via a reverse proxy).
+LIVE_DIFF_HOST=127.0.0.1
+
+# Display name in the UI. Optional — defaults to the repo's directory name.
+# LIVE_DIFF_NAME=my-repo
+
+# Background recompute interval, in ms. Optional — default 2500.
+# LIVE_DIFF_POLL=2500

@@ -1,0 +1,46 @@
+# live-diff systemd template — one instance per repository.
+#
+# The instance name (%i) selects its config file at /etc/live-diff/<name>.conf,
+# so you can run several repos at once: live-diff@webapp, live-diff@api, ...
+#
+# ---- Setup (run once) ----
+#   1. Put the app somewhere, e.g.:
+#        sudo git clone <your-live-diff-repo> /opt/live-diff
+#   2. Install this unit:
+#        sudo mkdir -p /etc/live-diff
+#        sudo cp deploy/live-diff@.service     /etc/systemd/system/
+#        sudo cp deploy/live-diff.conf.example /etc/live-diff/MYREPO.conf
+#   3. Edit THREE things (see the placeholders below / in the .conf):
+#        - the unit:  User=, Group=, WorkingDirectory=
+#        - the conf:  LIVE_DIFF_REPO, LIVE_DIFF_PORT
+#   4. Start it:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now live-diff@MYREPO
+#   5. Check it:  systemctl status live-diff@MYREPO   (then open http://127.0.0.1:<port>/)
+#
+# Per extra repo: copy the .conf to a new name, pick a new port, and
+# `systemctl enable --now live-diff@OTHERREPO`.
+
+[Unit]
+Description=live-diff working-tree viewer (%i)
+After=network.target
+# Optionally document where it listens, for `systemctl status` readers:
+# Documentation=https://github.com/YOU/live-diff
+
+[Service]
+Type=simple
+# >>> EDIT: the OS user that owns / can read the repo (and whose index staging writes to)
+User=__YOUR_USER__
+Group=__YOUR_USER__
+# >>> EDIT: where the live-diff app code lives (the folder containing server.js)
+WorkingDirectory=/opt/live-diff
+# Node may live anywhere (nvm, /usr/local/bin, ...); make sure it's on this PATH.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Per-instance config (LIVE_DIFF_REPO, LIVE_DIFF_PORT, LIVE_DIFF_HOST, LIVE_DIFF_NAME).
+EnvironmentFile=/etc/live-diff/%i.conf
+ExecStart=/usr/bin/env node server.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
