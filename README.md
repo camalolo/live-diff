@@ -10,6 +10,12 @@ edits, deletions, renames all appear in place, with no page reloads.
 - **Stage / unstage** any file with a checkbox (moves it between trees instantly).
 - **Monaco diff editor** (the VS Code engine) per file — real syntax highlighting,
   unified view, minimap.
+- **Go to definition (heuristic):** Ctrl+Click on any identifier — or F12, or
+  right-click → *Go to Definition* — searches the repo (`git grep`) and jumps to
+  the likeliest declaration, in any language. The target file opens read-only
+  with a "back to diff" button (or <kbd>Esc</kbd>). Not a language server: it
+  ranks declaration-shaped lines (`function x`, `def x`, `class X`, …) and
+  won't resolve dynamic/imported symbols perfectly.
 - **Live:** the server `fs.watch`es the working tree and pushes updates over
   Server-Sent Events within ~150 ms of any change.
 - **Read-only except explicit staging** — it never modifies your working-tree files.
@@ -158,6 +164,8 @@ diff.example.com {
   and, when you click a file, fetches its before/after content and shows it in a
   [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
   a CDN).
+- Go-to-definition asks the server to `git grep` the identifier; the client
+  ranks the hits (declaration-shaped lines first) and opens the best one.
 - Stage/unstage run `git add` / `git reset HEAD` on the server and refresh
   instantly.
 

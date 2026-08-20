@@ -221,6 +221,32 @@ const server = http.createServer(async (req, res) => {
     try { return send(res, 200, JSON.stringify(await getFile(p, side)), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); }
     catch (e) { return send(res, 500, JSON.stringify({ error: String(e.message || e) }), JSON_TYPE); }
   }
+  if (url === '/api/raw') {
+    const p = u.searchParams.get('path');
+    const rel = p != null ? safeRelPath(p) : null;
+    if (!rel) return send(res, 400, '{"error":"invalid path"}', JSON_TYPE);
+    let buf = await readFileSafe(rel); let where = 'wt';
+    if (buf == null) { buf = await gitBuf(['show', `HEAD:${rel}`]); where = 'head'; } // deleted in WT -> HEAD version
+    const noStore = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+    if (buf == null) return send(res, 200, JSON.stringify({ path: rel, content: null }), noStore);
+    const binary = buf.indexOf(0) !== -1;
+    return send(res, 200, JSON.stringify({ path: rel, where, binary, language: langFor(rel), content: binary ? null : buf.toString('utf8') }), noStore);
+  }
+  if (url === '/api/symbol') {
+    // Heuristic go-to-definition backend: fixed-string, word-bounded repo search
+    // over tracked + untracked (non-ignored) files. Ranking happens client-side.
+    const q = (u.searchParams.get('q') || '').trim();
+    if (!q || q.length > 120 || !/^[\w$]+$/.test(q)) return send(res, 400, '{"error":"bad query"}', JSON_TYPE);
+    const out = await gitBuf(['grep', '-n', '-w', '-F', '--untracked', '--exclude-standard', '--', q]);
+    const matches = [];
+    if (out) {
+      for (const line of out.toString('utf8').split('\n')) {
+        const m = line.match(/^(.+?):(\d+):(.*)$/);
+        if (m && matches.length < 200) matches.push({ path: m[1], line: +m[2], text: m[3].slice(0, 300) });
+      }
+    }
+    return send(res, 200, JSON.stringify({ q, matches }), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  }
   if (url === '/api/stage' && req.method === 'POST') {
     const p = u.searchParams.get('path');
     if (!p) return send(res, 400, '{"error":"missing path"}', JSON_TYPE);

@@ -51,6 +51,22 @@
     #diff { position: absolute; inset: 0; }
     .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 14px; pointer-events: none; text-align: center; padding: 20px; }
     .overlay .big { font-size: 40px; display: block; margin-bottom: 8px; opacity: .4; }
+    #code { position: absolute; inset: 0; display: none; }
+    .codebar {
+      position: absolute; top: 8px; right: 12px; z-index: 6; display: none; align-items: center; gap: 10px;
+      background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px 4px 4px; font-size: 12px;
+      max-width: 60%; box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    }
+    .codebar button { background: var(--bg-soft2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+    .codebar button:hover { border-color: var(--accent); color: var(--accent); }
+    .codebar .code-title { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+    .toast {
+      position: absolute; bottom: 14px; right: 14px; z-index: 7; max-width: 70%;
+      background: var(--bg-soft2); border: 1px solid var(--border); color: var(--text);
+      padding: 6px 12px; border-radius: 6px; font-size: 12px;
+      opacity: 0; transition: opacity .2s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
 
     .section { border-bottom: 1px solid var(--border); }
     .section-head {
@@ -127,6 +143,12 @@
     </aside>
     <main class="main">
       <div id="diff"></div>
+      <div id="code"></div>
+      <div class="codebar" id="codebar">
+        <button id="back-btn" title="Back to the diff view">‹ back to diff</button>
+        <span class="code-title" id="code-title"></span>
+      </div>
+      <div class="toast" id="toast"></div>
       <div class="overlay" id="overlay"><span class="big">‹/›</span>Select a file to view its diff.</div>
     </main>
   </div>
@@ -140,6 +162,9 @@
     };
 
     const diffEl = document.getElementById('diff'), overlay = document.getElementById('overlay');
+    const codeEl = document.getElementById('code'), codebar = document.getElementById('codebar');
+    const codeTitle = document.getElementById('code-title'), backBtn = document.getElementById('back-btn');
+    const toastEl = document.getElementById('toast');
     const treeStaged = document.getElementById('tree-staged'), treeUnstaged = document.getElementById('tree-unstaged');
     const cntStaged = document.getElementById('cnt-staged'), cntUnstaged = document.getElementById('cnt-unstaged');
     const liveEl = document.getElementById('live'), liveTxt = document.getElementById('livetxt');
@@ -149,6 +174,8 @@
     let monacoReady = null, diffEditor = null, currentModels = null;
     let currentPath = null, currentSide = null, currentSig = '';
     let lastSig = null, lastData = null, currentFilter = '';
+    let codeEditor = null, rawPath = null;
+    const rawModels = new Map(); // path -> monaco model (read-only file viewer, small LRU)
 
     function loadMonaco() {
       if (monacoReady) return monacoReady;
@@ -164,13 +191,120 @@
         readOnly: true, renderSideBySide: false, automaticLayout: true,
         minimap: { enabled: true }, scrollBeyondLastLine: false, renderWhitespace: 'selection',
       });
+      hookNav(diffEditor.getModifiedEditor());
+      hookNav(diffEditor.getOriginalEditor());
       return diffEditor;
     }
     function showOverlay(msg) { overlay.innerHTML = `<span class="big">‹/›</span>${msg}`; overlay.style.display = 'flex'; }
     function hideOverlay() { overlay.style.display = 'none'; }
     function sig(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
 
+    /* ---------------- go to definition (heuristic, all languages) ---------------- */
+    function toast(msg, ms = 2500) {
+      toastEl.textContent = msg; toastEl.classList.add('show');
+      clearTimeout(toast._t); toast._t = setTimeout(() => toastEl.classList.remove('show'), ms);
+    }
+    const KEYWORDS = /^(function|fn|func|def|class|interface|trait|enum|struct|impl|type|namespace|module|package|sub|proc|const|let|var|new|return|import|export|from|require|this|self|super|if|else|for|while|switch|case|try|catch|finally|throw|true|false|null|undefined|none|void|int|str|string|number|bool|public|private|protected|static|async|await|yield|use)$/i;
+
+    function rankDefs(matches, word, srcPath) {
+      const e = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const decl = new RegExp(
+        '(function|fn|func|def|class|interface|trait|enum|struct|impl|type|namespace|module|sub|proc|package)\\s+' + e + '\\b' +
+        '|\\b(const|let|var)\\s+' + e + '\\b' +
+        '|\\b' + e + '\\s*[:=]\\s*(async\\s+)?(function|\\()', 'i');
+      return matches
+        .map(m => ({ m, s: (decl.test(m.text) ? 10 : 0) + (m.path === srcPath ? 2 : 0) - Math.min((m.path.split('/').length - 1), 5) * 0.1 }))
+        .sort((a, b) => b.s - a.s)
+        .map(x => x.m);
+    }
+
+    async function tryGoto(editor, pos) {
+      const model = editor.getModel();
+      if (!model || !pos) return;
+      const w = model.getWordAtPosition(pos);
+      if (!w || !w.word || w.word.length < 2 || KEYWORDS.test(w.word)) return;
+      const word = w.word;
+      toast('searching "' + word + '"…', 8000);
+      try {
+        const r = await fetch('api/symbol?q=' + encodeURIComponent(word), { cache: 'no-store' });
+        const d = await r.json();
+        const src = rawPath || currentPath;
+        const hits = rankDefs(d.matches || [], word, src);
+        if (!hits.length) { toast('No definition found for "' + word + '"'); return; }
+        const h = hits[0];
+        if (h.path === src) { // same file -> reveal in place
+          const ed = rawPath ? codeEditor : (diffEditor && diffEditor.getModifiedEditor());
+          if (ed) {
+            ed.revealLineInCenter(h.line); ed.setPosition({ lineNumber: h.line, column: 1 }); ed.focus();
+            toast(hits.length > 1 ? hits.length + ' matches — jumped to best' : '', 1500);
+            return;
+          }
+        }
+        if (hits.length > 1) toast('Jumped to best of ' + hits.length + ' matches for "' + word + '"');
+        openRaw(h.path, h.line);
+      } catch (e) { toast('Symbol search failed'); }
+    }
+
+    function hookNav(editor) {
+      editor.addAction({
+        id: 'live-diff.goto-def', label: 'Go to Definition',
+        contextMenuGroupId: 'navigation', contextMenuOrder: 0,
+        keybindings: [monaco.KeyCode.F12],
+        run: (ed) => { const p = ed.getPosition(); if (p) tryGoto(ed, p); },
+      });
+      editor.onMouseDown((ev) => {
+        if ((ev.event.ctrlKey || ev.event.metaKey) && ev.target && ev.target.position) tryGoto(editor, ev.target.position);
+      });
+    }
+
+    async function openRaw(path, line) {
+      try {
+        const r = await fetch('api/raw?path=' + encodeURIComponent(path), { cache: 'no-store' });
+        if (!r.ok) throw new Error(r.status);
+        const d = await r.json();
+        if (d.binary) { toast('Binary file'); return; }
+        if (d.content == null) { toast('Not found: ' + path); return; }
+        const mono = await loadMonaco(); hideOverlay();
+        if (!codeEditor) {
+          codeEditor = mono.editor.create(codeEl, {
+            readOnly: true, automaticLayout: true, minimap: { enabled: true },
+            scrollBeyondLastLine: false, renderWhitespace: 'selection',
+          });
+          hookNav(codeEditor);
+        }
+        let m = rawModels.get(path);
+        if (!m) {
+          m = mono.editor.createModel(d.content || '', d.language);
+          rawModels.set(path, m);
+          if (rawModels.size > 30) { const k = rawModels.keys().next().value; const old = rawModels.get(k); rawModels.delete(k); if (old) old.dispose(); }
+        } else {
+          rawModels.delete(path); rawModels.set(path, m); // LRU refresh
+          if (m.getValue() !== (d.content || '')) m.setValue(d.content || '');
+        }
+        codeEditor.setModel(m);
+        diffEl.style.display = 'none'; codeEl.style.display = 'block';
+        codebar.style.display = 'flex'; codeTitle.textContent = path;
+        rawPath = path;
+        codeEditor.revealLineInCenter(line);
+        codeEditor.setPosition({ lineNumber: line, column: 1 });
+        codeEditor.focus();
+      } catch (e) { toast('Failed to open ' + path); }
+    }
+    function backToDiff() {
+      if (rawPath == null) return;
+      rawPath = null;
+      codeEl.style.display = 'none'; codebar.style.display = 'none';
+      if (codeEditor) codeEditor.setModel(null);
+      diffEl.style.display = 'block';
+      if (diffEditor && diffEditor.getModifiedEditor) diffEditor.getModifiedEditor().focus();
+    }
+    backBtn.addEventListener('click', backToDiff);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && rawPath != null && document.activeElement !== filterInput) backToDiff();
+    });
+
     async function loadFile(path, side, node) {
+      if (rawPath != null) backToDiff();
       document.querySelectorAll('.file.active').forEach(n => n.classList.remove('active'));
       if (node) node.classList.add('active');
       showOverlay('Loading…');
@@ -346,6 +480,15 @@
           }
         }
       } catch (e) { liveTxt.textContent = 'error'; }
+      // live-refresh the raw file view too, if open
+      if (rawPath) {
+        try {
+          const rr = await fetch('api/raw?path=' + encodeURIComponent(rawPath), { cache: 'no-store' });
+          const dd = await rr.json();
+          const m = rawModels.get(rawPath);
+          if (m && dd.content != null && m.getValue() !== dd.content) m.setValue(dd.content);
+        } catch (e) {}
+      }
     }
 
     /* ---------------- events ---------------- */
