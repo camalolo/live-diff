@@ -260,7 +260,9 @@ const server = http.createServer(async (req, res) => {
     // Prefer ripgrep when installed (much faster on big repos); git grep is the
     // zero-dependency fallback with the same file-set semantics.
     const q = (u.searchParams.get('q') || '').trim();
-    if (!q || q.length > 120 || !/^[\w$]+$/.test(q)) return send(res, 400, '{"error":"bad query"}', JSON_TYPE);
+    // Unicode-aware identifier chars (letters, digits, _, $) — accented
+    // identifiers must not 400.
+    if (!q || q.length > 120 || !/^[\p{L}\p{N}_$]+$/u.test(q)) return send(res, 400, '{"error":"bad query"}', JSON_TYPE);
     let out = null;
     if (await haveRg()) {
       // --hidden keeps tracked dotpaths (.github/…) searchable; .git itself is

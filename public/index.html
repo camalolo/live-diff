@@ -224,9 +224,18 @@
       const w = model.getWordAtPosition(pos);
       if (!w || !w.word || w.word.length < 2 || KEYWORDS.test(w.word)) return;
       const word = w.word;
+      if (!/^[\p{L}\p{N}_$]+$/u.test(word)) { toast('"' + word + '" is not a searchable identifier'); return; }
       toast('searching "' + word + '"…', 8000);
       try {
         const r = await fetch('api/symbol?q=' + encodeURIComponent(word), { cache: 'no-store' });
+        if (!r.ok) {
+          // A 404 here means the RUNNING server predates api/symbol (stale
+          // process / separate install) — its body is plain text, not JSON.
+          toast(r.status === 404
+            ? 'Server does not support symbol search — update + restart live-diff'
+            : 'Symbol search failed (HTTP ' + r.status + ')', 5000);
+          return;
+        }
         const d = await r.json();
         const src = rawPath || currentPath;
         const hits = rankDefs(d.matches || [], word, src);
