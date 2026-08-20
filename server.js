@@ -9,6 +9,10 @@
  *
  * Pure Node (zero npm runtime deps). Monaco loads from a CDN in the browser.
  *
+ * Changes are detected near-instantly via fs.watch on every directory that
+ * contains tracked or non-ignored files (plus .git), with the interval poll
+ * kept only as a safety net.
+ *
  *   node server.js --repo /path/to/repo --port 4966 --host 127.0.0.1
  *
  * Options can also be set via env vars: LIVE_DIFF_REPO, LIVE_DIFF_PORT,
@@ -32,7 +36,7 @@ Options:
   -p, --port <n>        port to listen on (default: 4966)
       --host <addr>     address to bind (default: 127.0.0.1)
   -n, --name <label>    display name shown in the UI (default: repo basename)
-      --poll <ms>       background recompute interval (default: 2500)
+      --poll <ms>       safety-net recompute interval (default: 2500)
   -h, --help            show this help
 
 Env: LIVE_DIFF_REPO, LIVE_DIFF_PORT, LIVE_DIFF_HOST, LIVE_DIFF_NAME, LIVE_DIFF_POLL
@@ -247,9 +251,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 /* ---------------------------- change detection ---------------------------- *
- * Serialized via a promise chain: every call (background poll AND stage/unstage
- * actions) appends one recompute that always runs — never skipped — so a
- * stage/unstage immediately recomputes with the post-action state and notifies. */
+ * Serialized via a promise chain: every call (watch events, background poll AND
+ * stage/unstage actions) appends one recompute that always runs — never
+ * skipped — so a stage/unstage immediately recomputes with the post-action
+ * state and notifies.
+ *
+ * Near-instant detection: fs.watch is installed on every directory that holds
+ * tracked or untracked-but-not-ignored files, plus their ancestors and .git
+ * (catches index/HEAD changes). Ignored dirs (node_modules, …) are never
+ * watched. Events are debounced; the poll stays as a fallback for anything
+ * watchers miss (inotify limits, network filesystems, …). */
 let pollTimer = null;
 let recomputeChain = Promise.resolve();
 function recomputeAndNotify() {
@@ -259,14 +270,70 @@ function recomputeAndNotify() {
       const hash = crypto.createHash('sha1').update(d.staged + '\x00' + d.unstaged).digest('hex');
       if (hash !== cachedHash) { cached = d; cachedHash = hash; notifyClients(); }
     } catch (e) { console.error('[live-diff] recompute error:', e.message); }
+    try { await refreshWatchers(); } catch (e) {}
   });
   return recomputeChain;
 }
 
+const dirWatchers = new Map(); // abs dir -> fs.FSWatcher
+const WATCH_DEBOUNCE_MS = 150; // quiet period before recompute
+const WATCH_MAX_WAIT_MS = 2000; // force a recompute after this long under continuous events
+let watchTimer = null, watchFirstAt = 0;
+
+function onWatchEvent() {
+  if (!watchFirstAt) watchFirstAt = Date.now();
+  const waited = Date.now() - watchFirstAt >= WATCH_MAX_WAIT_MS;
+  clearTimeout(watchTimer);
+  watchTimer = setTimeout(() => {
+    watchTimer = null; watchFirstAt = 0;
+    recomputeAndNotify();
+  }, waited ? 0 : WATCH_DEBOUNCE_MS);
+}
+
+function watchDir(dir) {
+  try {
+    const w = fs.watch(dir, onWatchEvent);
+    w.on('error', () => { try { w.close(); } catch (e) {} dirWatchers.delete(dir); });
+    dirWatchers.set(dir, w);
+  } catch (e) { /* e.g. EACCES or watcher limit — poll covers us */ }
+}
+
+async function getWatchDirs() {
+  const dirs = new Set([REPO, path.join(REPO, '.git')]);
+  let tracked = '', untracked = '';
+  try { tracked = await git(['ls-files']); } catch (e) {}
+  try { untracked = await git(['ls-files', '--others', '--exclude-standard']); } catch (e) {}
+  for (const list of [tracked, untracked]) {
+    for (const line of list.split('\n')) {
+      if (!line) continue;
+      let d = path.dirname(path.join(REPO, line));
+      while (true) {
+        dirs.add(d);
+        if (d === REPO) break;
+        d = path.dirname(d);
+      }
+    }
+  }
+  return dirs;
+}
+
+async function refreshWatchers() {
+  const dirs = await getWatchDirs();
+  for (const [dir, w] of dirWatchers) {
+    if (!dirs.has(dir)) { try { w.close(); } catch (e) {} dirWatchers.delete(dir); }
+  }
+  for (const dir of dirs) if (!dirWatchers.has(dir)) watchDir(dir);
+}
+
+function closeWatchers() {
+  for (const [, w] of dirWatchers) { try { w.close(); } catch (e) {} }
+  dirWatchers.clear();
+}
+
 (async () => {
   await recomputeAndNotify();
-  server.listen(PORT, HOST, () => console.log(`[live-diff] "${NAME}" (${REPO}) at http://${HOST}:${PORT}/ (poll ${POLL_MS}ms)`));
+  server.listen(PORT, HOST, () => console.log(`[live-diff] "${NAME}" (${REPO}) at http://${HOST}:${PORT}/ (fs.watch + poll ${POLL_MS}ms)`));
   pollTimer = setInterval(recomputeAndNotify, POLL_MS);
 })();
-process.on('SIGTERM', () => { clearInterval(pollTimer); server.close(); process.exit(0); });
-process.on('SIGINT', () => { clearInterval(pollTimer); server.close(); process.exit(0); });
+process.on('SIGTERM', () => { clearInterval(pollTimer); closeWatchers(); server.close(); process.exit(0); });
+process.on('SIGINT', () => { clearInterval(pollTimer); closeWatchers(); server.close(); process.exit(0); });

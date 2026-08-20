@@ -9,8 +9,9 @@ edits, deletions, renames all appear in place, with no page reloads.
   untracked), collapsible and grouped by directory.
 - **Stage / unstage** any file with a checkbox (moves it between trees instantly).
 - **Monaco diff editor** (the VS Code engine) per file — real syntax highlighting,
-  split or unified, minimap.
-- **Live:** Server-Sent Events push updates as your working tree changes.
+  unified view, minimap.
+- **Live:** the server `fs.watch`es the working tree and pushes updates over
+  Server-Sent Events within ~150 ms of any change.
 - **Read-only except explicit staging** — it never modifies your working-tree files.
 - **Zero runtime npm dependencies** (pure Node backend; Monaco loads from a CDN).
 
@@ -91,7 +92,7 @@ Options can be passed as CLI flags **or** environment variables (flags win).
 | `-p, --port`    | `LIVE_DIFF_PORT`  | `4966`             | port to listen on                    |
 | `--host`        | `LIVE_DIFF_HOST`  | `127.0.0.1`        | address to bind                       |
 | `-n, --name`    | `LIVE_DIFF_NAME`  | repo basename      | name shown in the UI                  |
-| `--poll`        | `LIVE_DIFF_POLL`  | `2500` (ms)        | background recompute interval         |
+| `--poll`        | `LIVE_DIFF_POLL`  | `2500` (ms)        | safety-net recompute interval (changes are normally detected instantly via `fs.watch`) |
 | `-h, --help`    |                  |                    | show help                             |
 
 ```bash
@@ -147,10 +148,12 @@ diff.example.com {
 
 ## How it works
 
-- The backend (`server.js`) is pure Node with **no dependencies**. Every couple
-  of seconds (and immediately after any stage/unstage) it recomputes
-  `git diff --cached HEAD` (staged) and `git diff` + untracked files (unstaged),
-  and pushes a notification to browsers over an SSE channel.
+- The backend (`server.js`) is pure Node with **no dependencies**. It watches
+  (via `fs.watch`) every directory containing tracked or non-ignored files plus
+  `.git`, and ~150 ms after any change it recomputes `git diff --cached HEAD`
+  (staged) and `git diff` + untracked files (unstaged), then pushes a
+  notification to browsers over an SSE channel. A slow interval poll runs as a
+  safety net; stage/unstage also recompute immediately.
 - The frontend (`public/index.html`) renders a collapsible Staged/Unstaged tree
   and, when you click a file, fetches its before/after content and shows it in a
   [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
