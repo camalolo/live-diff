@@ -92,6 +92,28 @@ function gitBuf(args) {
     });
   });
 }
+// ripgrep wrapper: resolves stdout on exit 0 (matches) AND exit 1 (no matches);
+// null only on real failure (missing binary, bad flags, …).
+// NOTE: callers must pass an explicit path ('.') — with no path and a piped
+// stdin (execFile default) rg would block reading stdin forever.
+function rgBuf(args) {
+  return new Promise((resolve) => {
+    execFile('rg', args, { cwd: REPO, maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' }, (err, stdout) => {
+      if (!err || err.code === 1) resolve(stdout || Buffer.alloc(0));
+      else resolve(null);
+    });
+  });
+}
+// Probed once; symbol search transparently falls back to git grep without rg.
+let rgProbe = null;
+function haveRg() {
+  if (rgProbe == null) {
+    rgProbe = new Promise((resolve) => {
+      execFile('rg', ['--version'], { timeout: 2000 }, (err) => resolve(!err));
+    });
+  }
+  return rgProbe;
+}
 function readFileSafe(relPath) {
   return new Promise((resolve) => {
     fs.readFile(path.join(REPO, relPath), (err, buf) => { if (err) resolve(null); else resolve(buf); });
@@ -235,14 +257,22 @@ const server = http.createServer(async (req, res) => {
   if (url === '/api/symbol') {
     // Heuristic go-to-definition backend: fixed-string, word-bounded repo search
     // over tracked + untracked (non-ignored) files. Ranking happens client-side.
+    // Prefer ripgrep when installed (much faster on big repos); git grep is the
+    // zero-dependency fallback with the same file-set semantics.
     const q = (u.searchParams.get('q') || '').trim();
     if (!q || q.length > 120 || !/^[\w$]+$/.test(q)) return send(res, 400, '{"error":"bad query"}', JSON_TYPE);
-    const out = await gitBuf(['grep', '-n', '-w', '-F', '--untracked', '--exclude-standard', '--', q]);
+    let out = null;
+    if (await haveRg()) {
+      // --hidden keeps tracked dotpaths (.github/…) searchable; .git itself is
+      // excluded. (Known gap vs git grep: files force-added past .gitignore.)
+      out = await rgBuf(['-n', '-w', '-F', '--no-messages', '--hidden', '--glob', '!.git', '--max-count', '50', '--', q, '.']);
+    }
+    if (out == null) out = await gitBuf(['grep', '-n', '-w', '-F', '--untracked', '--exclude-standard', '--', q]);
     const matches = [];
     if (out) {
       for (const line of out.toString('utf8').split('\n')) {
         const m = line.match(/^(.+?):(\d+):(.*)$/);
-        if (m && matches.length < 200) matches.push({ path: m[1], line: +m[2], text: m[3].slice(0, 300) });
+        if (m && matches.length < 200) matches.push({ path: m[1].replace(/^\.\//, ''), line: +m[2], text: m[3].slice(0, 300) });
       }
     }
     return send(res, 200, JSON.stringify({ q, matches }), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });

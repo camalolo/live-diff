@@ -25,6 +25,8 @@ edits, deletions, renames all appear in place, with no page reloads.
 
 - [Node.js](https://nodejs.org/) ≥ 18  (`node -v`)
 - `git` on your `PATH`  (`git --version`)
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) — faster
+  go-to-definition searches on large repos (falls back to `git grep`).
 
 ## Quick start (try it in 10 seconds)
 
@@ -164,8 +166,9 @@ diff.example.com {
   and, when you click a file, fetches its before/after content and shows it in a
   [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
   a CDN).
-- Go-to-definition asks the server to `git grep` the identifier; the client
-  ranks the hits (declaration-shaped lines first) and opens the best one.
+- Go-to-definition asks the server to search the repo for the identifier
+  (ripgrep when installed, `git grep` otherwise); the client ranks the hits
+  (declaration-shaped lines first) and opens the best one.
 - Stage/unstage run `git add` / `git reset HEAD` on the server and refresh
   instantly.
 
