@@ -33,10 +33,6 @@
     .stats { display: inline-flex; gap: 12px; font-variant-numeric: tabular-nums; }
     .stats .add { color: var(--green); } .stats .del { color: var(--red); } .stats .files { color: var(--text-dim); }
     .spacer { flex: 1; }
-    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-    .seg button { background: var(--bg-soft); color: var(--text-dim); border: 0; padding: 5px 10px; cursor: pointer; font-size: 12px; border-right: 1px solid var(--border); }
-    .seg button:last-child { border-right: 0; }
-    .seg button.active { background: var(--bg-soft2); color: var(--accent); }
     .stamp { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
     .app { flex: 1; display: flex; min-height: 0; }
@@ -107,10 +103,6 @@
       <span class="del" id="s-del"></span>
     </span>
     <span class="spacer"></span>
-    <span class="seg">
-      <button id="btn-split" class="active">Split</button>
-      <button id="btn-unified">Unified</button>
-    </span>
     <span class="stamp" id="stamp"></span>
   </header>
   <div class="app">
@@ -153,11 +145,9 @@
     const liveEl = document.getElementById('live'), liveTxt = document.getElementById('livetxt');
     const sFiles = document.getElementById('s-files'), sAdd = document.getElementById('s-add'), sDel = document.getElementById('s-del');
     const stamp = document.getElementById('stamp'), filterInput = document.getElementById('filter');
-    const btnSplit = document.getElementById('btn-split'), btnUnified = document.getElementById('btn-unified');
 
     let monacoReady = null, diffEditor = null, currentModels = null;
     let currentPath = null, currentSide = null, currentSig = '';
-    let sideBySide = true;
     let lastSig = null, lastData = null, currentFilter = '';
 
     function loadMonaco() {
@@ -171,7 +161,7 @@
     function ensureEditor(mono) {
       if (diffEditor) return diffEditor;
       diffEditor = mono.editor.createDiffEditor(diffEl, {
-        readOnly: true, renderSideBySide: sideBySide, automaticLayout: true,
+        readOnly: true, renderSideBySide: false, automaticLayout: true,
         minimap: { enabled: true }, scrollBeyondLastLine: false, renderWhitespace: 'selection',
       });
       return diffEditor;
@@ -368,9 +358,6 @@
       if (e.key === '/' && document.activeElement !== filterInput) { e.preventDefault(); filterInput.focus(); }
       if (e.key === 'Escape' && document.activeElement === filterInput) { filterInput.value = ''; currentFilter = ''; rerender(); filterInput.blur(); }
     });
-    function setLayout(sbs) { sideBySide = sbs; btnSplit.classList.toggle('active', sbs); btnUnified.classList.toggle('active', !sbs); if (diffEditor) diffEditor.updateOptions({ renderSideBySide: sbs }); }
-    btnSplit.addEventListener('click', () => setLayout(true));
-    btnUnified.addEventListener('click', () => setLayout(false));
     // section collapse (head click) + collapse-folders (acts)
     document.querySelectorAll('.section-head').forEach(h => h.addEventListener('click', (e) => {
       if (e.target.closest('.acts')) return;
