@@ -36,7 +36,7 @@ Options:
   -p, --port <n>        port to listen on (default: 4966)
       --host <addr>     address to bind (default: 127.0.0.1)
   -n, --name <label>    display name shown in the UI (default: repo basename)
-      --poll <ms>       safety-net recompute interval (default: 2500)
+      --poll <ms>       safety-net recompute interval (default: 15000)
   -h, --help            show this help
 
 Env: LIVE_DIFF_REPO, LIVE_DIFF_PORT, LIVE_DIFF_HOST, LIVE_DIFF_NAME, LIVE_DIFF_POLL
@@ -67,7 +67,7 @@ const ARGS = parseArgs(process.argv);
 const REPO = path.resolve(ARGS.repo || process.cwd());
 const PORT = parseInt(ARGS.port || '4966', 10);
 const HOST = ARGS.host || '127.0.0.1';
-const POLL_MS = parseInt(ARGS.poll || '2500', 10);
+const POLL_MS = parseInt(ARGS.poll || '15000', 10);
 const NAME = ARGS.name || path.basename(REPO);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -323,12 +323,16 @@ let pollTimer = null;
 let recomputeChain = Promise.resolve();
 function recomputeAndNotify() {
   recomputeChain = recomputeChain.then(async () => {
+    let changed = false;
     try {
       const d = await computeDiff();
       const hash = crypto.createHash('sha1').update(d.staged + '\x00' + d.unstaged).digest('hex');
-      if (hash !== cachedHash) { cached = d; cachedHash = hash; notifyClients(); }
+      if (hash !== cachedHash) { cached = d; cachedHash = hash; changed = true; notifyClients(); }
     } catch (e) { console.error('[live-diff] recompute error:', e.message); }
-    try { await refreshWatchers(); } catch (e) {}
+    // Refresh the watcher set only when something actually changed: it runs
+    // two full `git ls-files` passes, far too costly to repeat on every poll
+    // tick for large repos. (First run always changes: cachedHash starts null.)
+    if (changed) { try { await refreshWatchers(); } catch (e) {} }
   });
   return recomputeChain;
 }

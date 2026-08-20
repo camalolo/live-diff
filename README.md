@@ -100,7 +100,7 @@ Options can be passed as CLI flags **or** environment variables (flags win).
 | `-p, --port`    | `LIVE_DIFF_PORT`  | `4966`             | port to listen on                    |
 | `--host`        | `LIVE_DIFF_HOST`  | `127.0.0.1`        | address to bind                       |
 | `-n, --name`    | `LIVE_DIFF_NAME`  | repo basename      | name shown in the UI                  |
-| `--poll`        | `LIVE_DIFF_POLL`  | `2500` (ms)        | safety-net recompute interval (changes are normally detected instantly via `fs.watch`) |
+| `--poll`        | `LIVE_DIFF_POLL`  | `15000` (ms)       | safety-net recompute interval (changes are normally detected instantly via `fs.watch`; the poll is cheap insurance, not the hot path) |
 | `-h, --help`    |                  |                    | show help                             |
 
 ```bash
@@ -160,8 +160,10 @@ diff.example.com {
   (via `fs.watch`) every directory containing tracked or non-ignored files plus
   `.git`, and ~150 ms after any change it recomputes `git diff --cached HEAD`
   (staged) and `git diff` + untracked files (unstaged), then pushes a
-  notification to browsers over an SSE channel. A slow interval poll runs as a
-  safety net; stage/unstage also recompute immediately.
+  notification to browsers over an SSE channel. A slow interval poll (default
+  15 s) runs as a safety net; the expensive watcher-set refresh only happens
+  when the diff actually changed, so idle CPU on large repos is near zero.
+  Stage/unstage also recompute immediately.
 - The frontend (`public/index.html`) renders a collapsible Staged/Unstaged tree
   and, when you click a file, fetches its before/after content and shows it in a
   [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
