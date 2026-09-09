@@ -7,6 +7,10 @@ edits, deletions, renames all appear in place, with no page reloads.
 
 - **Two trees:** Staged (index vs HEAD) and Unstaged (working tree vs index +
   untracked), collapsible and grouped by directory.
+- **History:** the last 20 commits below the two trees. Click one to see the
+  unified diff it introduced (commit vs. first parent — the initial commit diffs
+  against the empty tree). Each entry shows +/− stats, author, relative time and
+  short SHA; merge commits are tagged and diffed against their first parent.
 - **Stage / unstage** any file with a checkbox (moves it between trees instantly).
 - **Monaco diff editor** (the VS Code engine) per file — real syntax highlighting,
   unified view, minimap.
@@ -168,6 +172,9 @@ diff.example.com {
   and, when you click a file, fetches its before/after content and shows it in a
   [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
   a CDN).
+- The History list comes from `git log -20 --numstat` (cached until HEAD moves);
+  clicking a commit fetches `git diff-tree -p --first-parent --root <sha>` and
+  renders it read-only with per-line add/del/hunk coloring.
 - Go-to-definition asks the server to search the repo for the identifier
   (ripgrep when installed, `git grep` otherwise); the client ranks the hits
   (declaration-shaped lines first) and opens the best one.

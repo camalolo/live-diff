@@ -107,6 +107,37 @@
     .file .fname.deleted { color: var(--red); }
     .cb { margin: 0; cursor: pointer; accent-color: var(--green); flex: 0 0 auto; }
     .cb:disabled { cursor: progress; }
+
+    /* history (last 20 commits) */
+    .commit-list { font-size: 12.5px; }
+    .commit { cursor: pointer; padding: 4px 6px; border-radius: 5px; }
+    .commit:hover { background: var(--bg-soft); }
+    .commit.active { background: rgba(88,166,255,.16); box-shadow: inset 2px 0 0 var(--accent); }
+    .commit .row1 { display: flex; align-items: baseline; gap: 6px; }
+    .commit .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .commit .mrg { color: var(--text-dim); font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
+    .commit .meta { display: flex; align-items: baseline; gap: 8px; color: var(--text-dim); font-size: 11px; margin-top: 1px; }
+    .commit .meta .sha { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--accent); opacity: .85; }
+    .commit .meta .when { font-variant-numeric: tabular-nums; }
+
+    /* commit patch view (main area) */
+    #commit { position: absolute; inset: 0; display: none; }
+    .commitbar {
+      position: absolute; top: 8px; right: 12px; z-index: 6; display: none; align-items: center; gap: 10px;
+      background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px 4px 4px; font-size: 12px;
+      max-width: 75%; box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    }
+    .commitbar button { background: var(--bg-soft2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+    .commitbar button:hover { border-color: var(--accent); color: var(--accent); }
+    .commit-title { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .commit-title .sha { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    /* unified-diff line coloring for the commit patch view */
+    .ld-add { background: rgba(63,185,80,.14); }
+    .ld-del { background: rgba(248,81,73,.14); }
+    .ld-hunk { background: rgba(88,166,255,.10); }
+    .ld-meta { color: var(--text-dim); }
+    .ld-fname { color: var(--text); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -140,13 +171,24 @@
         </div>
         <div class="section-tree"><div class="tree" id="tree-unstaged"></div></div>
       </div>
+      <div class="section history" id="sec-history">
+        <div class="section-head">
+          <span class="caret">▾</span><span class="label">History</span><span class="count" id="cnt-history"></span>
+        </div>
+        <div class="section-tree"><div class="commit-list" id="commit-list"></div></div>
+      </div>
     </aside>
     <main class="main">
       <div id="diff"></div>
+      <div id="commit"></div>
       <div id="code"></div>
       <div class="codebar" id="codebar">
         <button id="back-btn" title="Back to the diff view">‹ back to diff</button>
         <span class="code-title" id="code-title"></span>
+      </div>
+      <div class="commitbar" id="commitbar">
+        <button id="commit-back-btn" title="Back to the diff view">‹ back to diff</button>
+        <span class="commit-title" id="commit-title"></span>
       </div>
       <div class="toast" id="toast"></div>
       <div class="overlay" id="overlay"><span class="big">‹/›</span>Select a file to view its diff.</div>
@@ -170,12 +212,17 @@
     const liveEl = document.getElementById('live'), liveTxt = document.getElementById('livetxt');
     const sFiles = document.getElementById('s-files'), sAdd = document.getElementById('s-add'), sDel = document.getElementById('s-del');
     const stamp = document.getElementById('stamp'), filterInput = document.getElementById('filter');
+    const commitListEl = document.getElementById('commit-list'), cntHistory = document.getElementById('cnt-history');
+    const commitEl = document.getElementById('commit'), commitbar = document.getElementById('commitbar');
+    const commitTitle = document.getElementById('commit-title'), commitBackBtn = document.getElementById('commit-back-btn');
 
     let monacoReady = null, diffEditor = null, currentModels = null;
     let currentPath = null, currentSide = null, currentSig = '';
     let lastSig = null, lastData = null, currentFilter = '';
     let codeEditor = null, rawPath = null;
     const rawModels = new Map(); // path -> monaco model (read-only file viewer, small LRU)
+    let commitEditor = null, commitModel = null, commitDecor = null, openSha = null, openSubject = '';
+    let shownCommits = null, shownKey = '';
 
     function loadMonaco() {
       if (monacoReady) return monacoReady;
@@ -266,6 +313,16 @@
       });
     }
 
+    // The main area shows exactly one of: the diff editor, the commit patch view,
+    // or the raw file viewer.
+    function showMain(which) {
+      diffEl.style.display = which === 'diff' ? 'block' : 'none';
+      commitEl.style.display = which === 'commit' ? 'block' : 'none';
+      codeEl.style.display = which === 'raw' ? 'block' : 'none';
+      codebar.style.display = which === 'raw' ? 'flex' : 'none';
+      commitbar.style.display = which === 'commit' ? 'flex' : 'none';
+    }
+
     async function openRaw(path, line) {
       try {
         const r = await fetch('api/raw?path=' + encodeURIComponent(path), { cache: 'no-store' });
@@ -291,8 +348,7 @@
           if (m.getValue() !== (d.content || '')) m.setValue(d.content || '');
         }
         codeEditor.setModel(m);
-        diffEl.style.display = 'none'; codeEl.style.display = 'block';
-        codebar.style.display = 'flex'; codeTitle.textContent = path;
+        showMain('raw'); codeTitle.textContent = path;
         rawPath = path;
         codeEditor.revealLineInCenter(line);
         codeEditor.setPosition({ lineNumber: line, column: 1 });
@@ -302,18 +358,137 @@
     function backToDiff() {
       if (rawPath == null) return;
       rawPath = null;
-      codeEl.style.display = 'none'; codebar.style.display = 'none';
       if (codeEditor) codeEditor.setModel(null);
-      diffEl.style.display = 'block';
-      if (diffEditor && diffEditor.getModifiedEditor) diffEditor.getModifiedEditor().focus();
+      // return to the commit patch view if one is open, else the diff editor
+      showMain(openSha ? 'commit' : 'diff');
+      if (openSha && commitEditor) commitEditor.focus();
+      else if (diffEditor && diffEditor.getModifiedEditor) diffEditor.getModifiedEditor().focus();
     }
     backBtn.addEventListener('click', backToDiff);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && rawPath != null && document.activeElement !== filterInput) backToDiff();
+      else if (e.key === 'Escape' && openSha && document.activeElement !== filterInput) closeCommit();
     });
+
+    /* ---------------- commit history (last 20 commits) ---------------- */
+    function relTime(iso) {
+      const t = Date.parse(iso);
+      if (isNaN(t)) return '';
+      const s = Math.max(0, (Date.now() - t) / 1000);
+      if (s < 60) return 'just now';
+      const m = s / 60, h = m / 60, d = h / 24;
+      if (m < 60) return Math.floor(m) + 'm ago';
+      if (h < 24) return Math.floor(h) + 'h ago';
+      if (d < 30) return Math.floor(d) + 'd ago';
+      if (d < 365) return Math.floor(d / 30) + 'mo ago';
+      return Math.floor(d / 365) + 'y ago';
+    }
+    function renderHistory(commits) {
+      const key = commits.map(c => c.sha).join(',');
+      if (key === shownKey) return; // unchanged since last render
+      shownKey = key; shownCommits = commits;
+      cntHistory.textContent = commits.length ? String(commits.length) : '';
+      commitListEl.innerHTML = '';
+      if (!commits.length) { commitListEl.innerHTML = '<div class="empty-section">No commits yet.</div>'; return; }
+      for (const c of commits) {
+        const div = document.createElement('div');
+        div.className = 'commit' + (c.sha === openSha ? ' active' : '');
+        div.dataset.sha = c.sha;
+        const merge = c.parents && c.parents.length > 1;
+        const when = relTime(c.date);
+        const title = c.subject + '\n' + c.author + (c.date ? ' · ' + new Date(c.date).toLocaleString() : '');
+        const tag = merge ? '<span class="mrg">merge</span>'
+          : (c.binary && !c.add && !c.del ? '<span class="badge"><span class="muted">bin</span></span>' : badge(c.add, c.del));
+        div.innerHTML = `<div class="row1"><span class="subj" title="${esc(title)}">${esc(c.subject)}</span>${tag}</div>` +
+          `<div class="meta"><span class="sha">${esc(c.short)}</span><span>${esc(c.author)}</span>${when ? `<span class="when" title="${esc(c.date)}">${when}</span>` : ''}</div>`;
+        div.addEventListener('click', () => openCommit(c.sha, div));
+        commitListEl.appendChild(div);
+      }
+    }
+    async function loadHistory() {
+      try {
+        const r = await fetch('api/commits', { cache: 'no-store' });
+        if (r.status === 404) { // stale server process predating api/commits
+          document.getElementById('sec-history').style.display = 'none';
+          return;
+        }
+        if (!r.ok) return;
+        const d = await r.json();
+        renderHistory(d.commits || []);
+      } catch (e) {}
+    }
+
+    // Color the unified-diff lines of the commit patch view.
+    function decoratePatch(editor, model, text) {
+      if (commitDecor) { commitDecor.clear(); commitDecor = null; }
+      const lines = text.split('\n');
+      if (lines.length > 25000) return; // huge patch: skip per-line coloring
+      const decor = [];
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        let cls = null;
+        if (/^diff --git /.test(l)) cls = 'ld-fname';
+        else if (/^(index |old mode |new mode |deleted file mode |new file mode |copy from |copy to |rename from |rename to |similarity index |dissimilarity index |--- |\+\+\+ )/.test(l)) cls = 'ld-meta';
+        else if (l.startsWith('@@')) cls = 'ld-hunk';
+        else if (l.startsWith('+')) cls = 'ld-add';
+        else if (l.startsWith('-')) cls = 'ld-del';
+        if (cls) decor.push({ range: new monaco.Range(i + 1, 1, i + 1, 1), options: { isWholeLine: true, className: cls } });
+      }
+      if (decor.length && editor.createDecorationsCollection) {
+        commitDecor = editor.createDecorationsCollection(decor);
+      }
+    }
+    async function openCommit(sha, node) {
+      if (rawPath != null) backToDiff();
+      document.querySelectorAll('.commit.active').forEach(n => n.classList.remove('active'));
+      if (node) node.classList.add('active');
+      showOverlay('Loading commit…');
+      try {
+        const r = await fetch('api/commit?sha=' + encodeURIComponent(sha), { cache: 'no-store' });
+        if (!r.ok) throw new Error(r.status);
+        const d = await r.json();
+        const c = (shownCommits || []).find(x => x.sha === sha);
+        const subj = c ? c.subject : sha.slice(0, 8);
+        if (!d.patch || !d.patch.trim()) {
+          showMain('diff'); // close any previously open patch view
+          openSha = sha; openSubject = subj;
+          showOverlay('No textual changes in this commit.');
+          return;
+        }
+        const mono = await loadMonaco(); hideOverlay();
+        if (!commitEditor) {
+          commitEditor = mono.editor.create(commitEl, {
+            readOnly: true, automaticLayout: true, minimap: { enabled: true },
+            scrollBeyondLastLine: false, renderWhitespace: 'selection', guides: { indentation: false },
+          });
+          hookNav(commitEditor);
+        }
+        if (commitModel) commitModel.dispose();
+        commitModel = mono.editor.createModel(d.patch, 'plaintext');
+        commitEditor.setModel(commitModel);
+        decoratePatch(commitEditor, commitModel, d.patch);
+        showMain('commit');
+        commitTitle.innerHTML = `<span class="sha">${esc(sha.slice(0, 8))}</span> ${esc(subj)}`;
+        openSha = sha; openSubject = subj;
+        commitEditor.setScrollTop(0);
+      } catch (e) {
+        showOverlay('Failed to load commit.');
+      }
+    }
+    function closeCommit() {
+      if (!openSha) return;
+      openSha = null; openSubject = '';
+      document.querySelectorAll('.commit.active').forEach(n => n.classList.remove('active'));
+      if (commitDecor) { commitDecor.clear(); commitDecor = null; }
+      if (commitModel) { commitModel.dispose(); commitModel = null; }
+      if (commitEditor) commitEditor.setModel(null);
+      showMain('diff');
+    }
+    commitBackBtn.addEventListener('click', closeCommit);
 
     async function loadFile(path, side, node) {
       if (rawPath != null) backToDiff();
+      if (openSha) closeCommit();
       document.querySelectorAll('.file.active').forEach(n => n.classList.remove('active'));
       if (node) node.classList.add('active');
       showOverlay('Loading…');
@@ -460,8 +635,7 @@
         const sbTop = document.getElementById('sidebar').scrollTop;
         rerender();
         document.getElementById('sidebar').scrollTop = sbTop;
-        stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
-        // live-refresh the open file if it still exists on its side
+        stamp.textContent = 'updated ' + new Date().toLocaleTimeString();        // live-refresh the open file if it still exists on its side
         if (currentPath && currentSide) {
           const list = parseFiles(data[currentSide]);
           if (list.some(f => f.path === currentPath)) {
@@ -524,9 +698,9 @@
     }));
 
     const es = new EventSource('api/watch');
-    es.addEventListener('hello', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; refresh(); });
+    es.addEventListener('hello', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; refresh(); loadHistory(); });
     es.addEventListener('open', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; });
-    es.addEventListener('changed', refresh);
+    es.addEventListener('changed', () => { refresh(); loadHistory(); }); // server caches /api/commits until HEAD moves
     es.addEventListener('error', () => { liveEl.classList.remove('on'); liveTxt.textContent = 'reconnecting…'; });
 
     // Dynamic title from the server (repo name).
@@ -538,6 +712,7 @@
 
     loadMonaco();
     refresh();
+    loadHistory();
   </script>
 </body>
 </html>

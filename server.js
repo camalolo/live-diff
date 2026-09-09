@@ -198,6 +198,47 @@ async function getFile(filePath, side) {
   };
 }
 
+/* Commit history (sidebar): last 20 commits, cached until HEAD moves.
+   add/del come from --numstat; merges (2+ parents) get a first-parent diff in
+   /api/commit — i.e. exactly "the changes the commit introduced". */
+let logCache = { head: undefined, commits: null };
+async function getCommits() {
+  let head = null;
+  try { head = (await git(['rev-parse', '--verify', 'HEAD'])).trim(); } catch (e) {} // null: empty repo
+  if (logCache.head === head) return logCache.commits;
+  let out = '';
+  try {
+    out = await git(['log', '-20', '--no-color', '--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s', '--numstat']);
+  } catch (e) {}
+  const commits = [];
+  let cur = null;
+  for (const line of out.split('\n')) {
+    if (line.indexOf('\x1f') !== -1) {
+      const f = line.split('\x1f');
+      cur = {
+        sha: f[0], short: f[1], author: f[2], date: f[3],
+        parents: (f[4] || '').split(' ').filter(Boolean), subject: f[5] || '',
+        add: 0, del: 0, binary: false,
+      };
+      commits.push(cur);
+    } else if (cur) {
+      const m = line.match(/^(\d+|-)\t(\d+|-)\t/);
+      if (m) {
+        if (m[1] === '-' || m[2] === '-') cur.binary = true;
+        else { cur.add += +m[1]; cur.del += +m[2]; }
+      }
+    }
+  }
+  logCache = { head, commits };
+  return commits;
+}
+
+// Unified diff a commit introduced (vs first parent; --root covers the initial
+// commit). -U3 to match the staged/unstaged views.
+async function getCommitPatch(sha) {
+  return git(['diff-tree', '--no-commit-id', '--no-color', '-r', '-U3', '--root', '-p', '-m', '--first-parent', sha]);
+}
+
 /* ---------------------------- state / cache ---------------------------- */
 let cached = { staged: '', unstaged: '' };
 let cachedHash = null;
@@ -295,6 +336,19 @@ const server = http.createServer(async (req, res) => {
     try { await git(['reset', '-q', 'HEAD', '--', rel]); await recomputeAndNotify(); return send(res, 200, '{"ok":true}', JSON_TYPE); }
     catch (e) { return send(res, 500, JSON.stringify({ error: String(e.message || e) }), JSON_TYPE); }
   }
+  if (url === '/api/commits') {
+    const commits = await getCommits();
+    return send(res, 200, JSON.stringify({ commits }), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  }
+  if (url === '/api/commit') {
+    const sha = u.searchParams.get('sha') || '';
+    if (!/^[0-9a-f]{4,40}$/.test(sha)) return send(res, 400, '{"error":"bad sha"}', JSON_TYPE);
+    try {
+      let patch = await getCommitPatch(sha);
+      if (patch.length > 2 * 1024 * 1024) patch = patch.slice(0, 2 * 1024 * 1024) + '\n… (diff truncated)';
+      return send(res, 200, JSON.stringify({ sha, patch }), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    } catch (e) { return send(res, 404, '{"error":"unknown commit"}', JSON_TYPE); }
+  }
   if (url === '/api/health') {
     return send(res, 200, JSON.stringify({ ok: true, repo: REPO, name: NAME }), JSON_TYPE);
   }
@@ -326,7 +380,12 @@ function recomputeAndNotify() {
     let changed = false;
     try {
       const d = await computeDiff();
-      const hash = crypto.createHash('sha1').update(d.staged + '\x00' + d.unstaged).digest('hex');
+      // HEAD participates in the hash: a commit that leaves the working diff
+      // identical (e.g. committing the staged changes) must still notify, so
+      // the sidebar History re-renders.
+      let headSha = '';
+      try { headSha = (await git(['rev-parse', '--verify', 'HEAD'])).trim(); } catch (e) {}
+      const hash = crypto.createHash('sha1').update(d.staged + '\x00' + d.unstaged + '\x00' + headSha).digest('hex');
       if (hash !== cachedHash) { cached = d; cachedHash = hash; changed = true; notifyClients(); }
     } catch (e) { console.error('[live-diff] recompute error:', e.message); }
     // Refresh the watcher set only when something actually changed: it runs
