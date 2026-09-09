@@ -22,6 +22,11 @@ edits, deletions, renames all appear in place, with no page reloads.
   won't resolve dynamic/imported symbols perfectly.
 - **Live:** the server `fs.watch`es the working tree and pushes updates over
   Server-Sent Events within ~150 ms of any change.
+- **Lock-free watching:** recurring git reads run against a private index
+  snapshot (`GIT_INDEX_FILE` + `GIT_OPTIONAL_LOCKS=0`), so the watcher never
+  creates `.git/index.lock` and never contends with your own git, composer or
+  bin/magento commands. Only explicit stage/unstage (a checkbox you click)
+  touch the index.
 - **Read-only except explicit staging** — it never modifies your working-tree files.
 - **Zero runtime npm dependencies** (pure Node backend; Monaco loads from a CDN).
 

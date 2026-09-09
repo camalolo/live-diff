@@ -20,6 +20,7 @@
  */
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
@@ -77,17 +78,50 @@ const MIME = {
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
 };
 
-/* ---------------------------- git helpers ---------------------------- */
+/* ---------------------------- git helpers ---------------------------- *
+ * Lock discipline: this is a watcher — recurring reads must NEVER create
+ * .git/index.lock (git's opportunistic index refresh does, racing the user's
+ * own git commands). Two layers:
+ *   1. GIT_OPTIONAL_LOCKS=0 on every git call (kills optional locks; commands
+ *      whose real job is writing the index — add/reset — still lock fine).
+ *   2. Recurring reads (diffs, ls-files, `git show :path`) additionally run
+ *      against a private SNAPSHOT of .git/index via GIT_INDEX_FILE: git's
+ *      racy-clean index rewrite (not gated by GIT_OPTIONAL_LOCKS on older
+ *      gits) then locks <snapshot>.lock in /tmp instead of the user's .git.
+ * The snapshot is re-copied whenever the real index's stat changes (git
+ * replaces the index atomically, so a copy is always a valid snapshot). */
+const SNAP_DIR = path.join(os.tmpdir(), 'live-diff-' + crypto.createHash('sha1').update(REPO).digest('hex').slice(0, 12));
+const SNAP_INDEX = path.join(SNAP_DIR, 'index');
+let snapStatKey = null;
+function syncSnapshot() {
+  try {
+    const st = fs.statSync(path.join(REPO, '.git', 'index'));
+    const key = st.mtimeMs + ':' + st.size;
+    if (key === snapStatKey) return;
+    fs.mkdirSync(SNAP_DIR, { recursive: true });
+    fs.copyFileSync(path.join(REPO, '.git', 'index'), SNAP_INDEX);
+    snapStatKey = key;
+  } catch (e) { /* no index yet (fresh repo) or .git is a file — fall back below */ }
+}
+function snapEnv() {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+  if (snapStatKey != null) env.GIT_INDEX_FILE = SNAP_INDEX; // only when snapshot exists
+  return env;
+}
+function gitEnv() { return { ...process.env, GIT_OPTIONAL_LOCKS: '0' }; }
+
 function git(args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd: REPO, maxBuffer: 256 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
+    const env = opts.snapshot ? snapEnv() : gitEnv();
+    execFile('git', args, { cwd: REPO, maxBuffer: 256 * 1024 * 1024, env }, (err, stdout, stderr) => {
       if (err) reject(err); else resolve(stdout);
     });
   });
 }
-function gitBuf(args) {
+function gitBuf(args, opts = {}) {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd: REPO, maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' }, (err, stdout) => {
+    const env = opts.snapshot ? snapEnv() : gitEnv();
+    execFile('git', args, { cwd: REPO, maxBuffer: 256 * 1024 * 1024, encoding: 'buffer', env }, (err, stdout) => {
       if (err) resolve(null); else resolve(stdout);
     });
   });
@@ -144,12 +178,13 @@ async function untrackedDiff(filePath) {
 
 // { staged: <index vs HEAD>, unstaged: <working tree vs index + untracked> }
 async function computeDiff() {
+  syncSnapshot(); // all reads below use the private index snapshot
   let staged = '';
-  try { staged = await git(['-c', 'core.safecrlf=false', 'diff', '--cached', 'HEAD', '--no-color', '-U3']); } catch (e) {}
+  try { staged = await git(['-c', 'core.safecrlf=false', 'diff', '--cached', 'HEAD', '--no-color', '-U3'], { snapshot: true }); } catch (e) {}
   let unstaged = '';
-  try { unstaged = await git(['-c', 'core.safecrlf=false', 'diff', '--no-color', '-U3']); } catch (e) {}
+  try { unstaged = await git(['-c', 'core.safecrlf=false', 'diff', '--no-color', '-U3'], { snapshot: true }); } catch (e) {}
   let untrackedList = '';
-  try { untrackedList = await git(['ls-files', '--others', '--exclude-standard']); } catch (e) {}
+  try { untrackedList = await git(['ls-files', '--others', '--exclude-standard'], { snapshot: true }); } catch (e) {}
   const files = untrackedList.split('\n').filter(Boolean);
   let extra = '';
   for (const f of files) extra += await untrackedDiff(f);
@@ -174,8 +209,9 @@ function langFor(p) { return LANG_BY_EXT[path.extname(p).toLowerCase()] || 'plai
 async function getFile(filePath, side) {
   const rel = safeRelPath(filePath);
   if (rel == null) throw new Error('invalid path');
-  const idxBuf = await gitBuf(['show', `:${rel}`]);      // index (staged) version
-  const headBuf = await gitBuf(['show', `HEAD:${rel}`]);  // HEAD version
+  syncSnapshot(); // staged side shows `:path` from the snapshot
+  const idxBuf = await gitBuf(['show', `:${rel}`], { snapshot: true }); // index (staged) version
+  const headBuf = await gitBuf(['show', `HEAD:${rel}`]);                 // HEAD version
   const wtBuf = await readFileSafe(rel);                  // working-tree version
   const beforeBuf = side === 'staged' ? headBuf : idxBuf;
   const afterBuf = side === 'staged' ? idxBuf : wtBuf;
