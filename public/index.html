@@ -518,14 +518,45 @@
     }
 
     /* ---------------- diff parsing + tree ---------------- */
+    // Git C-quotes paths containing non-ASCII/special chars ("a/caf\303\251.dart");
+    // plain spaces stay BARE (a/My File.pdf b/My File.pdf) — both must parse,
+    // or the file shows up as a bogus "unknown" entry.
+    function unquoteQ(body) { // decode the INSIDE of a C-quoted path (no quotes)
+      if (body.indexOf('\\') === -1) return body;
+      const bytes = [], enc = new TextEncoder();
+      const esc = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11 };
+      for (let i = 0; i < body.length; ) {
+        const c = body[i];
+        if (c === '\\' && i + 1 < body.length) {
+          const n = body[i + 1];
+          if (n >= '0' && n <= '7') { // octal byte(s) — consecutive ones form multi-byte UTF-8
+            let o = 0, j = i + 1, k = 0;
+            while (j < body.length && k < 3 && body[j] >= '0' && body[j] <= '7') { o = o * 8 + +body[j]; j++; k++; }
+            bytes.push(o); i = j;
+          } else { bytes.push(n in esc ? esc[n] : n.charCodeAt(0)); i += 2; }
+        } else { bytes.push(...enc.encode(c)); i++; }
+      }
+      return new TextDecoder().decode(Uint8Array.from(bytes));
+    }
+    function unquoteGitPath(s) { return s.charCodeAt(0) === 34 ? unquoteQ(s.slice(1, -1)) : s; }
+    // Extract the NEW path from a `diff --git a/<old> b/<new>` header line
+    // (the prefix may or may not still be attached, depending on the splitter).
+    function headerPath(line) {
+      line = line.replace(/^diff --git /, '');
+      let m;
+      if ((m = line.match(/ "b\/((?:[^"\\]|\\.)*)"$/))) return unquoteQ(m[1]); // new side quoted
+      if ((m = line.match(/^"a\/(?:[^"\\]|\\.)*" b\/(.+)$/))) return m[1];     // old quoted, new bare
+      if ((m = line.match(/^a\/\S+ b\/(.+)$/))) return m[1];                    // both bare, old w/o spaces
+      const i = line.indexOf(' b/');                                          // both bare, spaces in path
+      return i > 2 ? line.slice(i + 3) : null;
+    }
     function parseFiles(diff) {
       if (!diff) return [];
       const blocks = diff.split(/^diff --git /m); const out = [];
       for (let bi = 1; bi < blocks.length; bi++) {
         const block = blocks[bi];
-        const head = block.match(/^a\/\S+ b\/(.+)$/m);
-        let p = head ? head[1] : 'unknown';
-        const rt = block.match(/^rename to (.+)$/m); if (rt) p = rt[1];
+        let p = headerPath(block.split('\n', 1)[0]) || 'unknown';
+        const rt = block.match(/^rename to (.+)$/m); if (rt) p = unquoteGitPath(rt[1].trim());
         let status = 'modified';
         if (/^new file mode/.test(block)) status = 'added';
         else if (/^deleted file mode/.test(block)) status = 'deleted';
@@ -602,8 +633,7 @@
       // Match the file PATH only, not the diff body — otherwise a query like
       // "grid." would match every file whose diffed code mentions "grid.".
       return blocks.filter(b => {
-        const head = b.match(/^diff --git a\/\S+ b\/(.+)$/m);
-        const path = head ? head[1] : '';
+        const path = headerPath(b.split('\n', 1)[0]) || '';
         return path.toLowerCase().includes(ql);
       }).join('');
     }
