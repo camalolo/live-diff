@@ -29,14 +29,15 @@
  *
  * Options can also be set via env vars: LIVE_DIFF_REPO, LIVE_DIFF_PORT,
  * LIVE_DIFF_HOST, LIVE_DIFF_NAME, LIVE_DIFF_POLL, LIVE_DIFF_ALLOW,
- * LIVE_DIFF_MAX_REPOS. CLI flags take precedence.
+ * LIVE_DIFF_MAX_REPOS, LIVE_DIFF_MAX_DIFF_MB, LIVE_DIFF_MAX_FILE_MB.
+ * CLI flags take precedence.
  */
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
 /* ---------------------------- config / args ---------------------------- */
 function printHelp() {
@@ -61,7 +62,8 @@ Every /api/* endpoint accepts ?repo=/abs/path too. LIVE_DIFF_ALLOW restricts
 which repositories may be opened; unset means any git repository is allowed.
 
 Env: LIVE_DIFF_REPO, LIVE_DIFF_PORT, LIVE_DIFF_HOST, LIVE_DIFF_NAME,
-     LIVE_DIFF_POLL, LIVE_DIFF_ALLOW, LIVE_DIFF_MAX_REPOS
+     LIVE_DIFF_POLL, LIVE_DIFF_ALLOW, LIVE_DIFF_MAX_REPOS,
+     LIVE_DIFF_MAX_DIFF_MB, LIVE_DIFF_MAX_FILE_MB
 `);
 }
 
@@ -95,6 +97,20 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // How many repositories may be watched at once (least-recently-used, idle ones
 // are evicted first — a repo with a live SSE client is never evicted).
 const MAX_REPOS = Math.max(1, parseInt(process.env.LIVE_DIFF_MAX_REPOS || '12', 10) || 12);
+
+/* Size caps — a working tree can produce diffs far larger than a JavaScript
+ * string may hold (V8's limit is ~512 MiB–1 GiB) or a browser may render.
+ * Rather than dying with "Invalid string length" mid-recompute (which freezes
+ * the UI on stale data until restart), oversized output is truncated at a
+ * `diff --git` block boundary with a visible marker line. */
+// Max diff text kept per tree (staged, unstaged incl. untracked).
+const MAX_DIFF_BYTES = Math.max(1, parseInt(process.env.LIVE_DIFF_MAX_DIFF_MB || '32', 10) || 32) * 1024 * 1024;
+// Max commit-patch text served by /api/commit (history click).
+const MAX_COMMIT_PATCH_BYTES = 2 * 1024 * 1024;
+// Text files larger than this are treated as binary by the per-file viewers
+// (tree diff block, /api/file, /api/raw) — Monaco cannot sanely render them.
+const MAX_TEXT_FILE_BYTES = Math.max(1, parseInt(process.env.LIVE_DIFF_MAX_FILE_MB || '16', 10) || 16) * 1024 * 1024;
+
 // Optional allowlist of repository prefixes (PATH-style, ':'-separated).
 // Empty = any git repository on the machine may be opened.
 const ALLOW = (process.env.LIVE_DIFF_ALLOW || '')
@@ -121,6 +137,22 @@ const LANG_BY_EXT = {
   '.csv': 'csv', '.txt': 'plaintext',
 };
 function langFor(p) { return LANG_BY_EXT[path.extname(p).toLowerCase()] || 'plaintext'; }
+
+/* Cap a git-diff Buffer into a string that is always safe to build and ship.
+ * Oversized output is cut at the last complete `diff --git` block boundary
+ * (so file headers/counts stay parseable) and a marker line is appended —
+ * it deliberately starts with '…' because the clients count '+'/'-'/'@@'
+ * lines and would misread a marker starting with those. Returns '' for null. */
+function diffText(buf, capBytes) {
+  if (!buf || !buf.length) return '';
+  if (buf.length <= capBytes) return buf.toString('utf8');
+  let cut = buf.lastIndexOf('\ndiff --git ', capBytes);       // keep whole blocks
+  if (cut === -1) cut = buf.lastIndexOf(0x0A, capBytes);      // else whole lines
+  if (cut === -1) cut = capBytes;
+  const kept = buf.slice(0, cut).toString('utf8');
+  return kept + `\n… (live-diff: truncated — output exceeded ${Math.round(capBytes / 1048576)} MiB; the rest is hidden) …\n`;
+}
+
 
 /* ---------------------------- ripgrep probe ---------------------------- *
  * Probed once; symbol search transparently falls back to git grep without rg.
@@ -208,6 +240,34 @@ class Repo {
       });
     });
   }
+  /* Stream-capped git run for diff-like output: collects at most `capBytes`
+   * of stdout (killing git once exceeded) and never builds anything larger.
+   * Unlike execFile+maxBuffer this cannot silently return an empty diff on
+   * huge output, and memory stays bounded no matter how big the diff gets.
+   * Resolves a Buffer, or null when git fails (same as gitBuf). */
+  gitDiffCapped(args, capBytes, opts = {}) {
+    return new Promise((resolve) => {
+      const env = opts.snapshot ? this.snapEnv() : this.gitEnv();
+      const child = spawn('git', args, { cwd: this.root, env, stdio: ['ignore', 'pipe', 'ignore'] });
+      const chunks = [];
+      let size = 0, capped = false;
+      child.stdout.on('data', (c) => {
+        if (capped) return;
+        if (size + c.length > capBytes) {
+          // Keep one sentinel byte past the cap so diffText() reliably sees
+          // "over cap" (exactly-cap buffers must not pass as complete).
+          chunks.push(c.subarray(0, Math.min(c.length, capBytes - size + 1)));
+          capped = true; child.kill('SIGTERM'); return;
+        }
+        chunks.push(c); size += c.length;
+      });
+      child.on('error', () => resolve(null));
+      child.on('close', (code) => {
+        if (code && !capped) resolve(null); // real git failure → caller treats as ''
+        else resolve(Buffer.concat(chunks));
+      });
+    });
+  }
   // ripgrep wrapper: resolves stdout on exit 0 (matches) AND exit 1 (no matches);
   // null only on real failure (missing binary, bad flags, …).
   // NOTE: callers must pass an explicit path ('.') — with no path and a piped
@@ -239,6 +299,11 @@ class Repo {
     const buf = await this.readFileSafe(filePath);
     if (buf == null) return '';
     if (buf.indexOf(0) !== -1) return `diff --git a/${filePath} b/${filePath}\nnew file mode 100644\nBinary files differ\n`;
+    if (buf.length > MAX_TEXT_FILE_BYTES) {
+      // Treat oversized text like git treats binaries: a placeholder block the
+      // UI shows without ever loading the content (Monaco would choke anyway).
+      return `diff --git a/${filePath} b/${filePath}\nnew file mode 100644\nindex 0000000..0000000\nBinary files differ (file exceeds ${Math.round(MAX_TEXT_FILE_BYTES / 1048576)} MiB)\n`;
+    }
     const lines = buf.toString('utf8').split('\n');
     if (lines.length && lines[lines.length - 1] === '') lines.pop();
     let out = `diff --git a/${filePath} b/${filePath}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/${filePath}\n`;
@@ -248,18 +313,35 @@ class Repo {
   }
 
   // { staged: <index vs HEAD>, unstaged: <working tree vs index + untracked> }
+  // All output is size-capped (see MAX_DIFF_BYTES): the three git reads run in
+  // parallel, untracked blocks are appended while a byte budget lasts, and no
+  // unbounded string concatenation happens anywhere on this path.
   async computeDiff() {
     this.syncSnapshot(); // all reads below use the private index snapshot
-    let staged = '';
-    try { staged = await this.git(['-c', 'core.safecrlf=false', 'diff', '--cached', 'HEAD', '--no-color', '-U3'], { snapshot: true }); } catch (e) {}
-    let unstaged = '';
-    try { unstaged = await this.git(['-c', 'core.safecrlf=false', 'diff', '--no-color', '-U3'], { snapshot: true }); } catch (e) {}
-    let untrackedList = '';
-    try { untrackedList = await this.git(['ls-files', '--others', '--exclude-standard'], { snapshot: true }); } catch (e) {}
-    const files = untrackedList.split('\n').filter(Boolean);
-    let extra = '';
-    for (const f of files) extra += await this.untrackedDiff(f);
-    return { staged, unstaged: unstaged + extra };
+    const diffArgs = ['-c', 'core.safecrlf=false', 'diff', '--no-color', '-U3'];
+    const [stagedBuf, unstagedBuf, untrackedBuf] = await Promise.all([
+      this.gitDiffCapped([...diffArgs, '--cached', 'HEAD'], MAX_DIFF_BYTES, { snapshot: true }),
+      this.gitDiffCapped(diffArgs, MAX_DIFF_BYTES, { snapshot: true }),
+      this.gitBuf(['ls-files', '--others', '--exclude-standard'], { snapshot: true }),
+    ]);
+    const staged = diffText(stagedBuf, MAX_DIFF_BYTES);
+    const unstaged = diffText(unstagedBuf, MAX_DIFF_BYTES);
+    // Untracked files: append "new file" blocks while the budget lasts. Each
+    // block is complete (untrackedDiff caps per file), so stopping between
+    // blocks keeps the result parseable; a marker records the cut.
+    const parts = [unstaged];
+    let size = Buffer.byteLength(unstaged);
+    let overflow = false;
+    if (untrackedBuf) {
+      for (const f of untrackedBuf.toString('utf8').split('\n')) {
+        if (!f) continue;
+        if (size >= MAX_DIFF_BYTES) { overflow = true; break; }
+        const d = await this.untrackedDiff(f);
+        parts.push(d); size += Buffer.byteLength(d);
+      }
+    }
+    if (overflow) parts.push(`\n… (live-diff: truncated — untracked diff exceeded ${Math.round(MAX_DIFF_BYTES / 1048576)} MiB total) …\n`);
+    return { staged, unstaged: parts.join('') };
   }
 
   // Before/after content of a file for a given side ('staged' or 'unstaged').
@@ -272,7 +354,7 @@ class Repo {
     const wtBuf = await this.readFileSafe(rel);                  // working-tree version
     const beforeBuf = side === 'staged' ? headBuf : idxBuf;
     const afterBuf = side === 'staged' ? idxBuf : wtBuf;
-    const isBin = (b) => b != null && b.indexOf(0) !== -1;
+    const isBin = (b) => b != null && (b.indexOf(0) !== -1 || b.length > MAX_TEXT_FILE_BYTES);
     const binary = isBin(beforeBuf) || isBin(afterBuf);
     let status;
     if (side === 'staged') {
@@ -326,9 +408,12 @@ class Repo {
   }
 
   // Unified diff a commit introduced (vs first parent; --root covers the initial
-  // commit). -U3 to match the staged/unstaged views.
+  // commit). -U3 to match the staged/unstaged views. Capped like the trees.
   async getCommitPatch(sha) {
-    return this.git(['diff-tree', '--no-commit-id', '--no-color', '-r', '-U3', '--root', '-p', '-m', '--first-parent', sha]);
+    const buf = await this.gitDiffCapped(
+      ['diff-tree', '--no-commit-id', '--no-color', '-r', '-U3', '--root', '-p', '-m', '--first-parent', sha],
+      MAX_COMMIT_PATCH_BYTES);
+    return diffText(buf, MAX_COMMIT_PATCH_BYTES);
   }
 
   /* ---------------------------- SSE clients ---------------------------- */
@@ -358,7 +443,12 @@ class Repo {
         // the sidebar History re-renders.
         let headSha = '';
         try { headSha = (await this.git(['rev-parse', '--verify', 'HEAD'])).trim(); } catch (e) {}
-        const hash = crypto.createHash('sha1').update(d.staged + '\x00' + d.unstaged + '\x00' + headSha).digest('hex');
+        // Incremental hashing: update() never concatenates the (possibly huge)
+        // diffs into one string the way `a + b + c` would.
+        const hash = crypto.createHash('sha1')
+          .update(d.staged).update('\x00')
+          .update(d.unstaged).update('\x00')
+          .update(headSha).digest('hex');
         if (hash !== this.cachedHash) { this.cached = d; this.cachedHash = hash; changed = true; this.notify(); }
       } catch (e) { console.error(`[live-diff] recompute error (${this.root}):`, e.message); }
       // Refresh the watcher set only when something actually changed: it runs
@@ -536,7 +626,9 @@ async function handleApi(route, u, req, res, repo) {
     let buf = await repo.readFileSafe(rel); let where = 'wt';
     if (buf == null) { buf = await repo.gitBuf(['show', `HEAD:${rel}`]); where = 'head'; } // deleted in WT -> HEAD version
     if (buf == null) return send(res, 200, JSON.stringify({ path: rel, content: null }), NO_STORE_JSON);
-    const binary = buf.indexOf(0) !== -1;
+    // Oversized text is flagged binary too: the clients then show a placeholder
+    // instead of piping hundreds of MiB into Monaco/the JSON response.
+    const binary = buf.indexOf(0) !== -1 || buf.length > MAX_TEXT_FILE_BYTES;
     return send(res, 200, JSON.stringify({ path: rel, where, binary, language: langFor(rel), content: binary ? null : buf.toString('utf8') }), NO_STORE_JSON);
   }
   if (route === '/api/symbol') {
@@ -619,7 +711,13 @@ const server = http.createServer(async (req, res) => {
     let repo;
     try { repo = await findRepo(u.searchParams.get('repo')); }
     catch (e) { return send(res, 400, JSON.stringify({ error: String(e.message || e) }), JSON_TYPE); }
-    return handleApi(P.slice(ai), u, req, res, repo);
+    // Never let an API error escape as an unhandled rejection — on modern Node
+    // that would take the whole server down.
+    try { return await handleApi(P.slice(ai), u, req, res, repo); }
+    catch (e) {
+      try { send(res, 500, JSON.stringify({ error: String((e && e.message) || e) }), JSON_TYPE); } catch (_) {}
+    }
+    return;
   }
 
   // Page request naming a repo: <mount-prefix>:<abs-repo-path>

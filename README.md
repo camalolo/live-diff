@@ -135,6 +135,8 @@ Options can be passed as CLI flags **or** environment variables (flags win).
 | `--poll`        | `LIVE_DIFF_POLL`  | `15000` (ms)       | safety-net recompute interval (changes are normally detected instantly via `fs.watch`; the poll is cheap insurance, not the hot path) |
 | —               | `LIVE_DIFF_ALLOW` | *(unset = all)*    | PATH-style (`:`-separated) list of absolute path prefixes other repositories must be under; default repo is always allowed |
 | —               | `LIVE_DIFF_MAX_REPOS` | `12`          | max repositories watched at once (LRU eviction of idle ones) |
+| —               | `LIVE_DIFF_MAX_DIFF_MB` | `32`        | max diff text kept per tree (staged / unstaged); larger diffs are truncated at a file boundary with a visible marker instead of crashing the recompute |
+| —               | `LIVE_DIFF_MAX_FILE_MB` | `16`        | text files larger than this are shown as binary placeholders in the tree and per-file viewers (Monaco cannot sanely render them) |
 | `-h, --help`    |                  |                    | show help                             |
 
 ```bash
@@ -209,6 +211,11 @@ diff.example.com {
   browsers over an SSE channel. A slow interval poll (default 15 s) runs as a
   safety net; the expensive watcher-set refresh only happens when the diff
   actually changed, so idle CPU on large repos is near zero.
+  Pathologically large diffs are capped: git output is streamed with a byte
+  budget and cut at a `diff --git` block boundary with a visible marker line,
+  so a huge changeset can never blow the JavaScript string limit and freeze
+  the UI with a stale tree (the historical failure mode: `Invalid string
+  length` on every recompute until restart).
   Stage/unstage also recompute immediately.
 - The frontend (`public/index.html`) renders a collapsible Staged/Unstaged tree
   and, when you click a file, fetches its before/after content and shows it in a
