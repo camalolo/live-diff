@@ -15,3 +15,12 @@ LIVE_DIFF_HOST=127.0.0.1
 
 # Background recompute interval, in ms. Optional — default 2500.
 # LIVE_DIFF_POLL=2500
+
+# Multi-repo: which OTHER repositories may be opened via /diff:<path> or ?repo=.
+# PATH-style (':'-separated) list of absolute path prefixes; unset = any git
+# repository is allowed. The repo above is always allowed.
+# LIVE_DIFF_ALLOW=/home/me:/srv/git
+
+# Max repositories watched at once. Optional — default 12 (idle ones are
+# evicted least-recently-used first).
+# LIVE_DIFF_MAX_REPOS=12

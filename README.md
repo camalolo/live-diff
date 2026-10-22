@@ -7,6 +7,11 @@ edits, deletions, renames all appear in place, with no page reloads.
 
 - **Two trees:** Staged (index vs HEAD) and Unstaged (working tree vs index +
   untracked), collapsible and grouped by directory.
+- **Multi-repository:** one instance serves a *default* repo (exactly as
+  configured), and can also open **any other repository on demand** —
+  `/diff:/abs/path/to/repo` in the URL (or `/diff/?repo=/abs/path`). Up to
+  `LIVE_DIFF_MAX_REPOS` repositories are watched at once; idle ones are evicted
+  least-recently-used first. Restrict access with `LIVE_DIFF_ALLOW`.
 - **History:** the last 20 commits below the two trees. Click one to see the
   unified diff it introduced (commit vs. first parent — the initial commit diffs
   against the empty tree). Each entry shows +/− stats, author, relative time and
@@ -50,6 +55,24 @@ Or, from inside the repo you want to watch:
 ```bash
 node /path/to/live-diff/server.js
 ```
+
+### Opening a different repository (multi-repo)
+
+The default repo is the one given via `--repo` / `LIVE_DIFF_REPO`. Any **other**
+repository on the machine can be opened on demand, without restarting anything:
+
+| URL                                     | shows                                             |
+|-----------------------------------------|---------------------------------------------------|
+| `/diff`                                 | the default repo (unchanged behavior)             |
+| `/diff:/home/me/other-repo`             | `/home/me/other-repo` (path after the mount point) |
+| `/diff/?repo=/home/me/other-repo`       | same thing, as a query parameter                   |
+
+Both forms work under any mount prefix and at the root (`/:/abs/path`).
+Repositories are validated (must be an existing git work tree) and watched on
+first use; watchers for repos nobody looks at are evicted (LRU) once
+`LIVE_DIFF_MAX_REPOS` (default 12) is exceeded. The sidebar header also has a
+**repo…** button that prompts for a path. Every `/api/*` endpoint accepts the
+same `?repo=` parameter.
 
 That's it for a quick look. For something that stays running and survives reboots,
 set it up as a service (below).
@@ -105,11 +128,13 @@ Options can be passed as CLI flags **or** environment variables (flags win).
 
 | Flag            | Env              | Default            | Description                          |
 |-----------------|------------------|--------------------|--------------------------------------|
-| `-r, --repo`    | `LIVE_DIFF_REPO`  | current directory  | repository to watch                  |
+| `-r, --repo`    | `LIVE_DIFF_REPO`  | current directory  | default repository to watch          |
 | `-p, --port`    | `LIVE_DIFF_PORT`  | `4966`             | port to listen on                    |
 | `--host`        | `LIVE_DIFF_HOST`  | `127.0.0.1`        | address to bind                       |
 | `-n, --name`    | `LIVE_DIFF_NAME`  | repo basename      | name shown in the UI                  |
 | `--poll`        | `LIVE_DIFF_POLL`  | `15000` (ms)       | safety-net recompute interval (changes are normally detected instantly via `fs.watch`; the poll is cheap insurance, not the hot path) |
+| —               | `LIVE_DIFF_ALLOW` | *(unset = all)*    | PATH-style (`:`-separated) list of absolute path prefixes other repositories must be under; default repo is always allowed |
+| —               | `LIVE_DIFF_MAX_REPOS` | `12`          | max repositories watched at once (LRU eviction of idle ones) |
 | `-h, --help`    |                  |                    | show help                             |
 
 ```bash
@@ -125,19 +150,28 @@ There's **no built-in authentication** — put it behind auth (see Security).
 
 ### nginx — under a sub-path (e.g. `/diff/`)
 
+The app detects its mount prefix itself, so the proxy can pass the URI through
+unchanged. This is the recommended config: it serves `/diff` (default repo) **and**
+`/diff:/abs/path/to/repo` (any other repo):
+
 ```nginx
 location = /diff { return 301 /diff/; }
 
-location /diff/ {
+location ^~ /diff {
     auth_basic           "restricted";
     auth_basic_user_file /etc/nginx/.htpasswd;
-    proxy_pass           http://127.0.0.1:4966/;   # trailing slash strips /diff prefix
+    proxy_pass           http://127.0.0.1:4966;      # NO trailing slash: pass the original URI
     proxy_http_version   1.1;
     proxy_set_header     Connection "";
     proxy_buffering      off;          # required for SSE
     proxy_read_timeout   3600s;
 }
 ```
+
+(With `proxy_pass http://127.0.0.1:4966/;` — trailing slash — the prefix is
+stripped instead; the app handles that too, but then the `/diff:<path>` URL
+form needs an extra `location ~ ^/diff:` block. The query-parameter form
+`/diff/?repo=/abs/path` works with either config.)
 
 ### nginx — at the root
 
@@ -165,13 +199,16 @@ diff.example.com {
 
 ## How it works
 
-- The backend (`server.js`) is pure Node with **no dependencies**. It watches
-  (via `fs.watch`) every directory containing tracked or non-ignored files plus
-  `.git`, and ~150 ms after any change it recomputes `git diff --cached HEAD`
-  (staged) and `git diff` + untracked files (unstaged), then pushes a
-  notification to browsers over an SSE channel. A slow interval poll (default
-  15 s) runs as a safety net; the expensive watcher-set refresh only happens
-  when the diff actually changed, so idle CPU on large repos is near zero.
+- The backend (`server.js`) is pure Node with **no dependencies**. It keeps one
+  watcher per repository (a private index snapshot, fs.watchers, SSE clients —
+  default repo first, others opened on demand and evicted LRU when
+  `LIVE_DIFF_MAX_REPOS` is exceeded). For each repo it watches (via `fs.watch`)
+  every directory containing tracked or non-ignored files plus `.git`, and
+  ~150 ms after any change it recomputes `git diff --cached HEAD` (staged) and
+  `git diff` + untracked files (unstaged), then pushes a notification to
+  browsers over an SSE channel. A slow interval poll (default 15 s) runs as a
+  safety net; the expensive watcher-set refresh only happens when the diff
+  actually changed, so idle CPU on large repos is near zero.
   Stage/unstage also recompute immediately.
 - The frontend (`public/index.html`) renders a collapsible Staged/Unstaged tree
   and, when you click a file, fetches its before/after content and shows it in a
@@ -188,12 +225,15 @@ diff.example.com {
 
 ## Security
 
-> ⚠️ Anyone who can reach the app can **stage and unstage files** in the target
-> repository (it modifies the git index; it never commits, pushes, or touches
-> your working-tree files). **Always run it behind authentication** (HTTP basic
+> ⚠️ Anyone who can reach the app can **stage and unstage files** in the watched
+> repositories (it modifies the git index; it never commits, pushes, or touches
+> your working-tree files), and in **multi-repo mode can open any repository the
+> server's user can read**. **Always run it behind authentication** (HTTP basic
 > auth in your reverse proxy, a VPN, SSH tunnel, etc.) and bind to `127.0.0.1`
 > unless access is protected. All client-supplied paths are validated to stay
-> within the repository.
+> within the repository being viewed; use `LIVE_DIFF_ALLOW` to restrict which
+> repositories may be opened at all (the default repo is always allowed, and
+> every repo opened this way is logged to the journal/stdout).
 
 ## Development
 

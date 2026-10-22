@@ -34,6 +34,11 @@
     .stats .add { color: var(--green); } .stats .del { color: var(--red); } .stats .files { color: var(--text-dim); }
     .spacer { flex: 1; }
     .stamp { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .hdr-btn {
+      background: var(--bg-soft2); color: var(--text-dim); border: 1px solid var(--border); border-radius: 5px;
+      padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap;
+    }
+    .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
 
     .app { flex: 1; display: flex; min-height: 0; }
     .sidebar { width: 350px; flex: 0 0 auto; overflow-y: auto; background: var(--bg); border-right: 1px solid var(--border); }
@@ -151,6 +156,7 @@
     </span>
     <span class="spacer"></span>
     <span class="stamp" id="stamp"></span>
+    <button id="repo-btn" class="hdr-btn" title="Open another repository by absolute path">repo…</button>
   </header>
   <div class="app">
     <aside class="sidebar" id="sidebar">
@@ -202,6 +208,22 @@
       getWorkerUrl: () => `data:text/javascript;charset=utf-8,${encodeURIComponent(
         `self.MonacoEnvironment={baseUrl:'${CDN}'};importScripts('${CDN}vs/base/worker/workerMain.js');`)}`,
     };
+
+    // Injected by the server for this page load. LD_BASE is the API base (the
+    // mount prefix, e.g. "/diff/" — or "/"), LD_REPO the repository shown (""
+    // = server default), LD_ERR a startup error (bad repo path) or null.
+    const LD_BASE = "__LD_BASE__";
+    const LD_REPO = "__LD_REPO__";
+    const LD_ERR = __LD_ERR__;
+
+    // Build an API URL under this deployment's mount prefix, carrying the repo
+    // parameter whenever a specific repository is being viewed.
+    function api(endpoint, params) {
+      const q = new URLSearchParams(params || {});
+      if (LD_REPO) q.set('repo', LD_REPO);
+      const s = q.toString();
+      return LD_BASE + 'api/' + endpoint + (s ? '?' + s : '');
+    }
 
     const diffEl = document.getElementById('diff'), overlay = document.getElementById('overlay');
     const codeEl = document.getElementById('code'), codebar = document.getElementById('codebar');
@@ -274,7 +296,7 @@
       if (!/^[\p{L}\p{N}_$]+$/u.test(word)) { toast('"' + word + '" is not a searchable identifier'); return; }
       toast('searching "' + word + '"…', 8000);
       try {
-        const r = await fetch('api/symbol?q=' + encodeURIComponent(word), { cache: 'no-store' });
+        const r = await fetch(api('symbol', { q: word }), { cache: 'no-store' });
         if (!r.ok) {
           // A 404 here means the RUNNING server predates api/symbol (stale
           // process / separate install) — its body is plain text, not JSON.
@@ -325,7 +347,7 @@
 
     async function openRaw(path, line) {
       try {
-        const r = await fetch('api/raw?path=' + encodeURIComponent(path), { cache: 'no-store' });
+        const r = await fetch(api('raw', { path }), { cache: 'no-store' });
         if (!r.ok) throw new Error(r.status);
         const d = await r.json();
         if (d.binary) { toast('Binary file'); return; }
@@ -407,7 +429,7 @@
     }
     async function loadHistory() {
       try {
-        const r = await fetch('api/commits', { cache: 'no-store' });
+        const r = await fetch(api('commits'), { cache: 'no-store' });
         if (r.status === 404) { // stale server process predating api/commits
           document.getElementById('sec-history').style.display = 'none';
           return;
@@ -444,7 +466,7 @@
       if (node) node.classList.add('active');
       showOverlay('Loading commit…');
       try {
-        const r = await fetch('api/commit?sha=' + encodeURIComponent(sha), { cache: 'no-store' });
+        const r = await fetch(api('commit', { sha }), { cache: 'no-store' });
         if (!r.ok) throw new Error(r.status);
         const d = await r.json();
         const c = (shownCommits || []).find(x => x.sha === sha);
@@ -493,7 +515,7 @@
       if (node) node.classList.add('active');
       showOverlay('Loading…');
       try {
-        const r = await fetch('api/file?path=' + encodeURIComponent(path) + '&side=' + side);
+        const r = await fetch(api('file', { path, side }));
         if (!r.ok) throw new Error(r.status);
         const data = await r.json();
         if (data.binary) { showOverlay('Binary file — no textual diff'); return; }
@@ -510,9 +532,9 @@
     }
 
     async function toggleStage(path, side, cb) {
-      const endpoint = side === 'unstaged' ? 'api/stage' : 'api/unstage';
+      const endpoint = side === 'unstaged' ? 'stage' : 'unstage';
       cb.disabled = true;
-      try { await fetch(endpoint + '?path=' + encodeURIComponent(path), { method: 'POST' }); }
+      try { await fetch(api(endpoint, { path }), { method: 'POST' }); }
       catch (e) { cb.disabled = false; }
       // server recomputes + notifies -> refresh() re-renders the trees.
     }
@@ -657,7 +679,7 @@
 
     async function refresh() {
       try {
-        const r = await fetch('api/diff', { cache: 'no-store' });
+        const r = await fetch(api('diff'), { cache: 'no-store' });
         const data = await r.json();
         const s = data.staged + '\x00' + data.unstaged;
         if (s === lastSig) return;
@@ -670,7 +692,7 @@
           const list = parseFiles(data[currentSide]);
           if (list.some(f => f.path === currentPath)) {
             try {
-              const r2 = await fetch('api/file?path=' + encodeURIComponent(currentPath) + '&side=' + currentSide, { cache: 'no-store' });
+              const r2 = await fetch(api('file', { path: currentPath, side: currentSide }), { cache: 'no-store' });
               const d2 = await r2.json();
               if (!d2.binary) {
                 const ns = sig(d2.before) + ':' + sig(d2.after);
@@ -696,7 +718,7 @@
       // live-refresh the raw file view too, if open
       if (rawPath) {
         try {
-          const rr = await fetch('api/raw?path=' + encodeURIComponent(rawPath), { cache: 'no-store' });
+          const rr = await fetch(api('raw', { path: rawPath }), { cache: 'no-store' });
           const dd = await rr.json();
           const m = rawModels.get(rawPath);
           if (m && dd.content != null && m.getValue() !== dd.content) m.setValue(dd.content);
@@ -727,22 +749,41 @@
       a.textContent = anyOpen ? 'expand' : 'collapse';
     }));
 
-    const es = new EventSource('api/watch');
-    es.addEventListener('hello', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; refresh(); loadHistory(); });
-    es.addEventListener('open', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; });
-    es.addEventListener('changed', () => { refresh(); loadHistory(); }); // server caches /api/commits until HEAD moves
-    es.addEventListener('error', () => { liveEl.classList.remove('on'); liveTxt.textContent = 'reconnecting…'; });
+    // Header button: open another repository by absolute path (URL form
+    // <mount>:<path>, e.g. /diff:/home/me/project).
+    document.getElementById('repo-btn').addEventListener('click', () => {
+      const p = prompt('Absolute path of the git repository to open:', LD_REPO || '');
+      if (!p) return;
+      const np = p.trim();
+      if (!np || np === LD_REPO) return;
+      const mount = LD_BASE === '/' ? '/' : LD_BASE.replace(/\/+$/, '');
+      location.href = mount + ':' + np;
+    });
 
-    // Dynamic title from the server (repo name).
-    fetch('api/config').then(r => r.json()).then(c => {
-      const n = c.name || 'live-diff';
-      document.getElementById('repo-name').textContent = n;
-      document.title = n + ' · live-diff';
-    }).catch(() => {});
+    if (LD_ERR) {
+      // Bad repo path in the URL (missing, not a directory, not allowed, …).
+      liveTxt.textContent = 'error';
+      showOverlay(esc(LD_ERR));
+    } else {
+      const es = new EventSource(api('watch'));
+      es.addEventListener('hello', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; refresh(); loadHistory(); });
+      es.addEventListener('open', () => { liveEl.classList.add('on'); liveTxt.textContent = 'live'; });
+      es.addEventListener('changed', () => { refresh(); loadHistory(); }); // server caches /api/commits until HEAD moves
+      es.addEventListener('error', () => { liveEl.classList.remove('on'); liveTxt.textContent = 'reconnecting…'; });
 
-    loadMonaco();
-    refresh();
-    loadHistory();
+      // Dynamic title from the server (repo name).
+      fetch(api('config')).then(r => r.json()).then(c => {
+        const n = c.name || 'live-diff';
+        const nameEl = document.getElementById('repo-name');
+        nameEl.textContent = n;
+        nameEl.title = c.repo || '';   // full path in the tooltip
+        document.title = n + ' · live-diff';
+      }).catch(() => {});
+
+      loadMonaco();
+      refresh();
+      loadHistory();
+    }
   </script>
 </body>
 </html>
