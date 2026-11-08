@@ -82,6 +82,7 @@
     .section-head .label { font-size: 12px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
     .section.staged .label { color: var(--staged); }
     .section.unstaged .label { color: var(--text-dim); }
+    .section.untracked .label { color: var(--green); }
     .section-head .count { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
     .section-head .acts { margin-left: auto; display: flex; gap: 8px; font-size: 11px; }
     .section-head .acts a { color: var(--text-dim); cursor: pointer; }
@@ -177,6 +178,13 @@
         </div>
         <div class="section-tree"><div class="tree" id="tree-unstaged"></div></div>
       </div>
+      <div class="section untracked" id="sec-untracked">
+        <div class="section-head">
+          <span class="caret">▾</span><span class="label">Untracked</span><span class="count" id="cnt-untracked"></span>
+          <span class="acts"><a class="fold-all">collapse</a></span>
+        </div>
+        <div class="section-tree"><div class="tree" id="tree-untracked"></div></div>
+      </div>
       <div class="section history" id="sec-history">
         <div class="section-head">
           <span class="caret">▾</span><span class="label">History</span><span class="count" id="cnt-history"></span>
@@ -230,7 +238,9 @@
     const codeTitle = document.getElementById('code-title'), backBtn = document.getElementById('back-btn');
     const toastEl = document.getElementById('toast');
     const treeStaged = document.getElementById('tree-staged'), treeUnstaged = document.getElementById('tree-unstaged');
+    const treeUntracked = document.getElementById('tree-untracked');
     const cntStaged = document.getElementById('cnt-staged'), cntUnstaged = document.getElementById('cnt-unstaged');
+    const cntUntracked = document.getElementById('cnt-untracked');
     const liveEl = document.getElementById('live'), liveTxt = document.getElementById('livetxt');
     const sFiles = document.getElementById('s-files'), sAdd = document.getElementById('s-add'), sDel = document.getElementById('s-del');
     const stamp = document.getElementById('stamp'), filterInput = document.getElementById('filter');
@@ -508,7 +518,8 @@
     }
     commitBackBtn.addEventListener('click', closeCommit);
 
-    async function loadFile(path, side, node) {
+    function loadFile(path, side, node) {
+      return queueEditorUpdate(async () => {
       if (rawPath != null) backToDiff();
       if (openSha) closeCommit();
       document.querySelectorAll('.file.active').forEach(n => n.classList.remove('active'));
@@ -521,18 +532,23 @@
         if (data.binary) { showOverlay('Binary file — no textual diff'); return; }
         const s = sig(data.before) + ':' + sig(data.after);
         const mono = await loadMonaco(); hideOverlay(); ensureEditor(mono);
-        if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
-        currentModels = {
+        // Attach the new models BEFORE disposing the old ones: Monaco throws
+        // "TextModel got disposed before DiffEditorWidget model got reset"
+        // when a model still attached to the editor is disposed.
+        const nextModels = {
           original: mono.editor.createModel(data.before || '', data.language),
           modified: mono.editor.createModel(data.after || '', data.language),
         };
-        diffEditor.setModel(currentModels);
+        diffEditor.setModel(nextModels);
+        if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
+        currentModels = nextModels;
         currentPath = path; currentSide = side; currentSig = s;
       } catch (e) { showOverlay('Failed to load: ' + path); }
+      });
     }
 
     async function toggleStage(path, side, cb) {
-      const endpoint = side === 'unstaged' ? 'stage' : 'unstage';
+      const endpoint = side === 'staged' ? 'unstage' : 'stage';
       cb.disabled = true;
       try { await fetch(api(endpoint, { path }), { method: 'POST' }); }
       catch (e) { cb.disabled = false; }
@@ -659,29 +675,42 @@
         return path.toLowerCase().includes(ql);
       }).join('');
     }
-    function updateStats(sf, uf) {
-      let a = 0, d = 0; for (const f of sf) { a += f.add; d += f.del; } for (const f of uf) { a += f.add; d += f.del; }
-      const n = sf.length + uf.length;
+    function updateStats(sf, uf, tf) {
+      let a = 0, d = 0;
+      for (const list of [sf, uf, tf]) for (const f of list) { a += f.add; d += f.del; }
+      const n = sf.length + uf.length + tf.length;
       sFiles.textContent = n + (n === 1 ? ' file' : ' files'); sAdd.textContent = '+' + a; sDel.textContent = '−' + d;
       cntStaged.textContent = sf.length ? `${sf.length} · +${sf.reduce((x, f) => x + f.add, 0)} −${sf.reduce((x, f) => x + f.del, 0)}` : '';
       cntUnstaged.textContent = uf.length ? `${uf.length} · +${uf.reduce((x, f) => x + f.add, 0)} −${uf.reduce((x, f) => x + f.del, 0)}` : '';
+      cntUntracked.textContent = tf.length ? String(tf.length) : '';
     }
 
     function rerender() {
       if (!lastData) return;
       const sf = parseFiles(filterDiff(lastData.staged, currentFilter));
       const uf = parseFiles(filterDiff(lastData.unstaged, currentFilter));
+      const tf = parseFiles(filterDiff(lastData.untracked || '', currentFilter));
       document.getElementById('sec-staged').style.display = sf.length ? '' : 'none';
+      document.getElementById('sec-untracked').style.display = tf.length ? '' : 'none';
       renderSection('staged', sf, treeStaged);
       renderSection('unstaged', uf, treeUnstaged);
-      updateStats(sf, uf);
+      renderSection('untracked', tf, treeUntracked);
+      updateStats(sf, uf, tf);
     }
 
-    async function refresh() {
+    /* Diff-editor model updates (refresh, loadFile) run serialized on one
+     * promise chain: each fetch+apply completes before the next starts, so
+     * overlapping runs (an SSE burst vs. a stale answer fetched mid-recompute)
+     * can never interleave their model set/dispose calls. */
+    let uiChain = Promise.resolve();
+    function queueEditorUpdate(body) { uiChain = uiChain.catch(() => {}); uiChain = uiChain.then(body); return uiChain; }
+
+    function refresh() {
+      return queueEditorUpdate(async () => {
       try {
         const r = await fetch(api('diff'), { cache: 'no-store' });
         const data = await r.json();
-        const s = data.staged + '\x00' + data.unstaged;
+        const s = data.staged + '\x00' + data.unstaged + '\x00' + (data.untracked || '');
         if (s === lastSig) return;
         lastSig = s; lastData = data;
         const sbTop = document.getElementById('sidebar').scrollTop;
@@ -698,18 +727,20 @@
                 const ns = sig(d2.before) + ':' + sig(d2.after);
                 if (ns !== currentSig) {
                   const mono = await loadMonaco(); ensureEditor(mono);
-                  if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
-                  currentModels = {
+                  // setModel first, dispose after (see note in loadFile)
+                  const nextModels = {
                     original: mono.editor.createModel(d2.before || '', d2.language),
                     modified: mono.editor.createModel(d2.after || '', d2.language),
                   };
-                  diffEditor.setModel(currentModels); currentSig = ns;
+                  diffEditor.setModel(nextModels);
+                  if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
+                  currentModels = nextModels; currentSig = ns;
                 }
               }
             } catch (e) {}
           } else {
+            if (diffEditor) diffEditor.setModel(null); // detach before dispose ({original:null,…} throws in monaco 0.52)
             if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); currentModels = null; }
-            if (diffEditor) diffEditor.setModel({ original: null, modified: null });
             currentPath = null; currentSide = null; currentSig = '';
             showOverlay('File no longer changed.');
           }
@@ -724,6 +755,7 @@
           if (m && dd.content != null && m.getValue() !== dd.content) m.setValue(dd.content);
         } catch (e) {}
       }
+      });
     }
 
     /* ---------------- events ---------------- */

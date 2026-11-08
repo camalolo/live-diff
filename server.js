@@ -4,7 +4,7 @@
  * live-diff — a live working-tree diff viewer with per-file staging.
  *
  * Serves a Monaco-backed diff of any git repository's working tree, split into
- * STAGED (index vs HEAD) and UNSTAGED (working tree vs index + untracked)
+ * STAGED (index vs HEAD), UNSTAGED (working tree vs index) and UNTRACKED
  * collapsible trees, with per-file stage/unstage. Pushes live updates over SSE.
  * Any number of repositories can be watched at once.
  *
@@ -103,7 +103,7 @@ const MAX_REPOS = Math.max(1, parseInt(process.env.LIVE_DIFF_MAX_REPOS || '12', 
  * Rather than dying with "Invalid string length" mid-recompute (which freezes
  * the UI on stale data until restart), oversized output is truncated at a
  * `diff --git` block boundary with a visible marker line. */
-// Max diff text kept per tree (staged, unstaged incl. untracked).
+// Max diff text kept per tree (staged, unstaged, untracked).
 const MAX_DIFF_BYTES = Math.max(1, parseInt(process.env.LIVE_DIFF_MAX_DIFF_MB || '32', 10) || 32) * 1024 * 1024;
 // Max commit-patch text served by /api/commit (history click).
 const MAX_COMMIT_PATCH_BYTES = 2 * 1024 * 1024;
@@ -180,7 +180,7 @@ class Repo {
     this.started = false;
     this.pollTimer = null;
 
-    this.cached = { staged: '', unstaged: '' };
+    this.cached = { staged: '', unstaged: '', untracked: '' };
     this.cachedHash = null;
     this.logCache = { head: undefined, commits: null };
 
@@ -312,7 +312,8 @@ class Repo {
     return out;
   }
 
-  // { staged: <index vs HEAD>, unstaged: <working tree vs index + untracked> }
+  // { staged: <index vs HEAD>, unstaged: <working tree vs index>,
+  //   untracked: <synthetic "new file" blocks, one per non-ignored untracked file> }
   // All output is size-capped (see MAX_DIFF_BYTES): the three git reads run in
   // parallel, untracked blocks are appended while a byte budget lasts, and no
   // unbounded string concatenation happens anywhere on this path.
@@ -326,25 +327,28 @@ class Repo {
     ]);
     const staged = diffText(stagedBuf, MAX_DIFF_BYTES);
     const unstaged = diffText(unstagedBuf, MAX_DIFF_BYTES);
-    // Untracked files: append "new file" blocks while the budget lasts. Each
-    // block is complete (untrackedDiff caps per file), so stopping between
-    // blocks keeps the result parseable; a marker records the cut.
-    const parts = [unstaged];
-    let size = Buffer.byteLength(unstaged);
+    // Untracked files form their own tree (the sidebar has a dedicated
+    // Untracked section). Each block is complete (untrackedDiff caps per
+    // file), so stopping between blocks keeps the result parseable; a marker
+    // records the cut.
+    const uparts = [];
+    let usize = 0;
     let overflow = false;
     if (untrackedBuf) {
       for (const f of untrackedBuf.toString('utf8').split('\n')) {
         if (!f) continue;
-        if (size >= MAX_DIFF_BYTES) { overflow = true; break; }
+        if (usize >= MAX_DIFF_BYTES) { overflow = true; break; }
         const d = await this.untrackedDiff(f);
-        parts.push(d); size += Buffer.byteLength(d);
+        uparts.push(d); usize += Buffer.byteLength(d);
       }
     }
-    if (overflow) parts.push(`\n… (live-diff: truncated — untracked diff exceeded ${Math.round(MAX_DIFF_BYTES / 1048576)} MiB total) …\n`);
-    return { staged, unstaged: parts.join('') };
+    if (overflow) uparts.push(`\n… (live-diff: truncated — untracked diff exceeded ${Math.round(MAX_DIFF_BYTES / 1048576)} MiB total) …\n`);
+    return { staged, unstaged, untracked: uparts.join('') };
   }
 
-  // Before/after content of a file for a given side ('staged' or 'unstaged').
+  // Before/after content of a file for a given side ('staged', 'unstaged' or
+  // 'untracked' — untracked compares the same pair as unstaged: index vs
+  // working tree, and an untracked file simply has no index version).
   async getFile(filePath, side) {
     const rel = this.safeRelPath(filePath);
     if (rel == null) throw new Error('invalid path');
@@ -448,6 +452,7 @@ class Repo {
         const hash = crypto.createHash('sha1')
           .update(d.staged).update('\x00')
           .update(d.unstaged).update('\x00')
+          .update(d.untracked).update('\x00')
           .update(headSha).digest('hex');
         if (hash !== this.cachedHash) { this.cached = d; this.cachedHash = hash; changed = true; this.notify(); }
       } catch (e) { console.error(`[live-diff] recompute error (${this.root}):`, e.message); }
@@ -614,7 +619,8 @@ async function handleApi(route, u, req, res, repo) {
   }
   if (route === '/api/file') {
     const p = u.searchParams.get('path');
-    const side = u.searchParams.get('side') === 'staged' ? 'staged' : 'unstaged';
+    const s = u.searchParams.get('side');
+    const side = s === 'staged' || s === 'untracked' ? s : 'unstaged';
     if (!p || !repo.safeRelPath(p)) return send(res, 400, '{"error":"invalid path"}', JSON_TYPE);
     try { return send(res, 200, JSON.stringify(await repo.getFile(p, side)), NO_STORE_JSON); }
     catch (e) { return send(res, 500, JSON.stringify({ error: String(e.message || e) }), JSON_TYPE); }

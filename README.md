@@ -5,8 +5,9 @@ per-file staging. Point it at a repo and get a fast, GitHub/VS Code-style view o
 your staged + unstaged changes that updates in real time as you edit — new files,
 edits, deletions, renames all appear in place, with no page reloads.
 
-- **Two trees:** Staged (index vs HEAD) and Unstaged (working tree vs index +
-  untracked), collapsible and grouped by directory.
+- **Three trees:** Staged (index vs HEAD), Unstaged (working tree vs index) and
+  Untracked (non-ignored files git doesn't know about yet), collapsible and
+  grouped by directory.
 - **Multi-repository:** one instance serves a *default* repo (exactly as
   configured), and can also open **any other repository on demand** —
   `/diff:/abs/path/to/repo` in the URL (or `/diff/?repo=/abs/path`). Up to
@@ -206,9 +207,9 @@ diff.example.com {
   default repo first, others opened on demand and evicted LRU when
   `LIVE_DIFF_MAX_REPOS` is exceeded). For each repo it watches (via `fs.watch`)
   every directory containing tracked or non-ignored files plus `.git`, and
-  ~150 ms after any change it recomputes `git diff --cached HEAD` (staged) and
-  `git diff` + untracked files (unstaged), then pushes a notification to
-  browsers over an SSE channel. A slow interval poll (default 15 s) runs as a
+  ~150 ms after any change it recomputes `git diff --cached HEAD` (staged),
+  `git diff` (unstaged) and the untracked file list, then pushes a notification
+  to browsers over an SSE channel. A slow interval poll (default 15 s) runs as a
   safety net; the expensive watcher-set refresh only happens when the diff
   actually changed, so idle CPU on large repos is near zero.
   Pathologically large diffs are capped: git output is streamed with a byte
@@ -217,10 +218,10 @@ diff.example.com {
   the UI with a stale tree (the historical failure mode: `Invalid string
   length` on every recompute until restart).
   Stage/unstage also recompute immediately.
-- The frontend (`public/index.html`) renders a collapsible Staged/Unstaged tree
-  and, when you click a file, fetches its before/after content and shows it in a
-  [Monaco](https://microsoft.github.io/monaco-editor/) diff editor (loaded from
-  a CDN).
+- The frontend (`public/index.html`) renders collapsible Staged/Unstaged/
+  Untracked trees and, when you click a file, fetches its before/after content
+  and shows it in a [Monaco](https://microsoft.github.io/monaco-editor/) diff
+  editor (loaded from a CDN).
 - The History list comes from `git log -20 --numstat` (cached until HEAD moves);
   clicking a commit fetches `git diff-tree -p --first-parent --root <sha>` and
   renders it read-only with per-line add/del/hunk coloring.
