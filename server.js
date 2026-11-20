@@ -705,7 +705,12 @@ async function handleApi(route, u, req, res, repo) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, 'http://localhost');
+  // A request target like "//:/x" (note: curl normalizes "/:/x" into that form)
+  // is parsed by Node as protocol-relative with an invalid host and THROWS —
+  // unguarded, that exception kills the whole server. 400 and move on.
+  let u;
+  try { u = new URL(req.url, 'http://localhost'); }
+  catch (e) { return send(res, 400, 'bad request URL'); }
   let P;
   try { P = decodeURIComponent(u.pathname); } catch (e) { P = u.pathname; }
 
