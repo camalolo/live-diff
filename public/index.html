@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d1117">
   <title>live-diff</title>
   <style>
     :root {
@@ -66,7 +67,7 @@
     .codebar button:hover { border-color: var(--accent); color: var(--accent); }
     .codebar .code-title { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
     .toast {
-      position: absolute; bottom: 14px; right: 14px; z-index: 7; max-width: 70%;
+      position: fixed; bottom: 14px; right: 14px; z-index: 7; max-width: 70%;
       background: var(--bg-soft2); border: 1px solid var(--border); color: var(--text);
       padding: 6px 12px; border-radius: 6px; font-size: 12px;
       opacity: 0; transition: opacity .2s; pointer-events: none;
@@ -144,6 +145,50 @@
     .ld-hunk { background: rgba(88,166,255,.10); }
     .ld-meta { color: var(--text-dim); }
     .ld-fname { color: var(--text); font-weight: 600; }
+
+    /* mobile top bar (only shown on narrow screens, above the main view) */
+    .mobilebar {
+      display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 8;
+      height: 42px; align-items: center; gap: 8px; padding: 0 8px;
+      background: var(--bg-soft); border-bottom: 1px solid var(--border);
+    }
+    .mobilebar button {
+      background: var(--bg-soft2); color: var(--text); border: 1px solid var(--border); border-radius: 5px;
+      padding: 6px 10px; cursor: pointer; font-size: 13px; white-space: nowrap; flex: 0 0 auto;
+    }
+    .mobilebar button:hover { border-color: var(--accent); color: var(--accent); }
+    .mobilebar .t-dir, .mobilebar .t-base {
+      color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0; flex: 0 1 auto; font-size: 12.5px;
+    }
+    .mobilebar .t-dir { color: var(--text-dim); }
+
+    /* ---------------- phones / narrow screens ---------------- */
+    @media (max-width: 700px) {
+      header { height: 44px; gap: 8px; padding: 0 10px; }
+      .title { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .title small { display: none; }
+      .stamp { display: none; }
+      .hdr-btn { padding: 5px 10px; font-size: 13px; }
+
+      .app { position: relative; }
+      .sidebar { width: 100%; flex: 1 1 auto; border-right: none; -webkit-overflow-scrolling: touch; }
+      /* the diff area covers the whole screen once a file/commit is opened */
+      .main { position: absolute; inset: 0; z-index: 20; display: none; background: var(--bg); }
+      body.in-main .main { display: block; }
+      body.in-main .mobilebar { display: flex; }
+      #diff, #commit, #code { inset: 42px 0 0 0; } /* leave room for the mobile bar */
+      .codebar, .commitbar { display: none !important; } /* the mobile bar replaces them */
+
+      .filter-bar input { font-size: 16px; } /* >=16px: iOS Safari doesn't zoom the input on focus */
+      .tree, .commit-list { font-size: 13px; }
+      .file, .folder > summary, .commit { padding-top: 7px; padding-bottom: 7px; -webkit-user-select: none; user-select: none; }
+      .cb { width: 18px; height: 18px; }
+      .section-head { padding: 10px; }
+    }
+    @media (max-width: 480px) {
+      .live { display: none; } /* keep title + stats + repo button on tiny screens */
+    }
   </style>
 </head>
 <body>
@@ -204,6 +249,10 @@
         <button id="commit-back-btn" title="Back to the diff view">‹ back to diff</button>
         <span class="commit-title" id="commit-title"></span>
       </div>
+      <div class="mobilebar" id="mobilebar">
+        <button id="mobile-back" title="Back to the file list">‹ files</button>
+        <span class="t-dir" id="mb-dir"></span><span class="t-base" id="mb-base"></span>
+      </div>
       <div class="toast" id="toast"></div>
       <div class="overlay" id="overlay"><span class="big">‹/›</span>Select a file to view its diff.</div>
     </main>
@@ -247,6 +296,51 @@
     const commitListEl = document.getElementById('commit-list'), cntHistory = document.getElementById('cnt-history');
     const commitEl = document.getElementById('commit'), commitbar = document.getElementById('commitbar');
     const commitTitle = document.getElementById('commit-title'), commitBackBtn = document.getElementById('commit-back-btn');
+    const mbDir = document.getElementById('mb-dir'), mbBase = document.getElementById('mb-base');
+
+    /* ---------------- phones / narrow screens ---------------- */
+    // On a narrow screen the sidebar (file list) takes the whole width; opening a
+    // file/commit/raw view slides `.main` over it (body.in-main), with a top bar
+    // (back button + title) replacing the desktop floating bars.
+    const mqMobile = window.matchMedia('(max-width: 700px)');
+    const isMobile = () => mqMobile.matches;
+    const enterMain = () => { if (isMobile()) document.body.classList.add('in-main'); };
+    const exitMain = () => document.body.classList.remove('in-main');
+    function applyMobileEditorOpts() {
+      const o = isMobile()
+        ? { minimap: { enabled: false }, wordWrap: 'on', fontSize: 12 }   // narrow: every column counts
+        : { minimap: { enabled: true }, wordWrap: 'off', fontSize: 14 };  // Monaco defaults
+      if (diffEditor) diffEditor.updateOptions(o);
+      if (codeEditor) codeEditor.updateOptions(o);
+      if (commitEditor) commitEditor.updateOptions(o);
+    }
+    // Crossing the breakpoint in either direction: retune the editors and sync
+    // which view is visible (desktop always shows both panes).
+    function onMobileFlip() {
+      applyMobileEditorOpts();
+      if (!isMobile()) { exitMain(); return; }
+      // keep the bar's title truthful about whatever view is currently loaded
+      if (rawPath != null) setMobileTitle(rawPath);
+      else if (openSha) setMobileCommitTitle(openSha, openSubject);
+      else if (currentPath) setMobileTitle(currentPath);
+      document.body.classList.toggle('in-main', !!(currentPath || openSha || rawPath));
+    }
+    if (mqMobile.addEventListener) mqMobile.addEventListener('change', onMobileFlip);
+    else if (mqMobile.addListener) mqMobile.addListener(onMobileFlip);
+    function setMobileTitle(path) {
+      const i = path.lastIndexOf('/');
+      mbDir.textContent = i > 0 ? path.slice(0, i + 1) : '';
+      mbBase.textContent = path.slice(i + 1);
+    }
+    function setMobileCommitTitle(sha, subj) {
+      mbDir.textContent = '';
+      mbBase.textContent = sha.slice(0, 8) + ' ' + subj;
+    }
+    document.getElementById('mobile-back').addEventListener('click', () => {
+      if (rawPath != null) backToDiff();      // raw view -> back to what opened it
+      else if (openSha) closeCommit();        // commit patch -> back to the list
+      else exitMain();                        // plain diff -> back to the list
+    });
 
     let monacoReady = null, diffEditor = null, currentModels = null;
     let currentPath = null, currentSide = null, currentSig = '';
@@ -272,6 +366,7 @@
       });
       hookNav(diffEditor.getModifiedEditor());
       hookNav(diffEditor.getOriginalEditor());
+      applyMobileEditorOpts();
       return diffEditor;
     }
     function showOverlay(msg) { overlay.innerHTML = `<span class="big">‹/›</span>${msg}`; overlay.style.display = 'flex'; }
@@ -369,6 +464,7 @@
             scrollBeyondLastLine: false, renderWhitespace: 'selection',
           });
           hookNav(codeEditor);
+          applyMobileEditorOpts();
         }
         let m = rawModels.get(path);
         if (!m) {
@@ -381,6 +477,7 @@
         }
         codeEditor.setModel(m);
         showMain('raw'); codeTitle.textContent = path;
+        enterMain(); setMobileTitle(path);
         rawPath = path;
         codeEditor.revealLineInCenter(line);
         codeEditor.setPosition({ lineNumber: line, column: 1 });
@@ -393,6 +490,7 @@
       if (codeEditor) codeEditor.setModel(null);
       // return to the commit patch view if one is open, else the diff editor
       showMain(openSha ? 'commit' : 'diff');
+      if (isMobile() && !openSha) { exitMain(); return; } // no commit underneath -> back to the file list
       if (openSha && commitEditor) commitEditor.focus();
       else if (diffEditor && diffEditor.getModifiedEditor) diffEditor.getModifiedEditor().focus();
     }
@@ -484,6 +582,7 @@
         if (!d.patch || !d.patch.trim()) {
           showMain('diff'); // close any previously open patch view
           openSha = sha; openSubject = subj;
+          enterMain(); setMobileCommitTitle(sha, subj);
           showOverlay('No textual changes in this commit.');
           return;
         }
@@ -494,6 +593,7 @@
             scrollBeyondLastLine: false, renderWhitespace: 'selection', guides: { indentation: false },
           });
           hookNav(commitEditor);
+          applyMobileEditorOpts();
         }
         if (commitModel) commitModel.dispose();
         commitModel = mono.editor.createModel(d.patch, 'plaintext');
@@ -501,6 +601,7 @@
         decoratePatch(commitEditor, commitModel, d.patch);
         showMain('commit');
         commitTitle.innerHTML = `<span class="sha">${esc(sha.slice(0, 8))}</span> ${esc(subj)}`;
+        enterMain(); setMobileCommitTitle(sha, subj);
         openSha = sha; openSubject = subj;
         commitEditor.setScrollTop(0);
       } catch (e) {
@@ -515,6 +616,7 @@
       if (commitModel) { commitModel.dispose(); commitModel = null; }
       if (commitEditor) commitEditor.setModel(null);
       showMain('diff');
+      if (isMobile()) exitMain(); // back to the file list (loadFile re-enters when switching files)
     }
     commitBackBtn.addEventListener('click', closeCommit);
 
@@ -522,6 +624,7 @@
       return queueEditorUpdate(async () => {
       if (rawPath != null) backToDiff();
       if (openSha) closeCommit();
+      enterMain(); setMobileTitle(path); // slide the main view over the list (mobile)
       document.querySelectorAll('.file.active').forEach(n => n.classList.remove('active'));
       if (node) node.classList.add('active');
       showOverlay('Loading…');
@@ -543,7 +646,7 @@
         if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); }
         currentModels = nextModels;
         currentPath = path; currentSide = side; currentSig = s;
-      } catch (e) { showOverlay('Failed to load: ' + path); }
+      } catch (e) { showOverlay('Failed to load: ' + path); if (isMobile()) toast('Failed to load: ' + path, 4000); }
       });
     }
 
@@ -743,6 +846,7 @@
             if (currentModels) { currentModels.original.dispose(); currentModels.modified.dispose(); currentModels = null; }
             currentPath = null; currentSide = null; currentSig = '';
             showOverlay('File no longer changed.');
+            if (isMobile()) exitMain(); // nothing to show -> back to the list
           }
         }
       } catch (e) { liveTxt.textContent = 'error'; }

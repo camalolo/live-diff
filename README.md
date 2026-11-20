@@ -26,6 +26,9 @@ edits, deletions, renames all appear in place, with no page reloads.
   with a "back to diff" button (or <kbd>Esc</kbd>). Not a language server: it
   ranks declaration-shaped lines (`function x`, `def x`, `class X`, …) and
   won't resolve dynamic/imported symbols perfectly.
+- **Mobile-friendly:** on narrow screens (≤ 700 px) the file list takes the
+  full width and the diff opens as a full-screen view with a *‹ files* back
+  bar; editors drop the minimap, word-wrap lines and shrink to fit a phone.
 - **Live:** the server `fs.watch`es the working tree and pushes updates over
   Server-Sent Events within ~150 ms of any change.
 - **Lock-free watching:** recurring git reads run against a private index
